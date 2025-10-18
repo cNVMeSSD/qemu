@@ -13,8 +13,6 @@ run `make` and you'll get a QEMU binary.
 
 ## Updating QEMU
 
-For example, for `v10.1.1`:
-
-```bash
-git subtree pull --prefix qemu https://gitlab.com/qemu-project/qemu.git v10.1.1 --squash
-```
+Get yourself a new tarball, and change the source tarball in the `Makefile`.
+You'll probably have to update the patches, you can use `quilt` to apply and
+track these, as the `qemu` folder is not tracked in `git`.
