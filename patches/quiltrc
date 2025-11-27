@@ -1,0 +1,9 @@
+export QUILT_PUSH_ARGS="--color=auto"
+export QUILT_REFRESH_ARGS="-p ab --strip-trailing-whitespace --backup"
+export QUILT_SERIES_ARGS="--color=auto"
+export QUILT_PATCHES_ARGS="--color=auto"
+export QUILT_NO_DIFF_TIMESTAMPS=1
+export QUILT_DIFF_ARGS="-p ab --color=auto"
+export QUILT_SERIES="patches/series"
+export QUILT_DIFF_OPTS="-p -U 6"
+export QUILT_PATCHES="patches"
