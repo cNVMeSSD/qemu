@@ -235,4 +235,8 @@ config IOSB
 config XLNX_VERSAL_TRNG
     bool
 
+config QEMU_EPC
+    bool
+    depends on VFIO_USER_SERVER
+
 source macio/Kconfig
