@@ -1,37 +1,31 @@
-Index: b/qemu/hw/misc/Kconfig
+Index: qemu/qemu/hw/misc/Kconfig
 ===================================================================
---- a/qemu/hw/misc/Kconfig
-+++ b/qemu/hw/misc/Kconfig
-@@ -232,7 +232,11 @@ config DJMEMC
- config IOSB
-     bool
- 
+--- qemu.orig/qemu/hw/misc/Kconfig
++++ qemu/qemu/hw/misc/Kconfig
+@@ -235,4 +235,8 @@ config IOSB
  config XLNX_VERSAL_TRNG
      bool
  
-+config QEMU_EPC
++config PCI_EPC
 +    bool
 +    depends on VFIO_USER_SERVER
 +
  source macio/Kconfig
-Index: b/qemu/hw/misc/meson.build
+Index: qemu/qemu/hw/misc/meson.build
 ===================================================================
---- a/qemu/hw/misc/meson.build
-+++ b/qemu/hw/misc/meson.build
-@@ -158,6 +158,9 @@ specific_ss.add(when: 'CONFIG_MIPS_CPS',
- specific_ss.add(when: 'CONFIG_MIPS_ITU', if_true: files('mips_itu.c'))
- 
- system_ss.add(when: 'CONFIG_SBSA_REF', if_true: files('sbsa_ec.c'))
+--- qemu.orig/qemu/hw/misc/meson.build
++++ qemu/qemu/hw/misc/meson.build
+@@ -161,3 +161,6 @@ system_ss.add(when: 'CONFIG_SBSA_REF', i
  
  # HPPA devices
  system_ss.add(when: 'CONFIG_LASI', if_true: files('lasi.c'))
 +
 +# QEMU PCI-Express EPC
-+system_ss.add(when: 'CONFIG_QEMU_EPC', if_true: files('qemu-epc.c'))
-Index: b/qemu/hw/misc/qemu-epc.c
++system_ss.add(when: 'CONFIG_PCI_EPC', if_true: files('qemu-epc.c'))
+Index: qemu/qemu/hw/misc/qemu-epc.c
 ===================================================================
 --- /dev/null
-+++ b/qemu/hw/misc/qemu-epc.c
++++ qemu/qemu/hw/misc/qemu-epc.c
 @@ -0,0 +1,734 @@
 +/*
 + * QEMU PCI Endpoint Controller device
@@ -767,14 +761,11 @@ Index: b/qemu/hw/misc/qemu-epc.c
 +static void qemu_epc_register_type(void) { type_register_static(&qepc_info); }
 +
 +type_init(qemu_epc_register_type);
-Index: b/qemu/include/hw/pci/pci.h
+Index: qemu/qemu/include/hw/pci/pci.h
 ===================================================================
---- a/qemu/include/hw/pci/pci.h
-+++ b/qemu/include/hw/pci/pci.h
-@@ -118,12 +118,13 @@ extern bool pci_available;
- #define PCI_DEVICE_ID_REDHAT_MDPY        0x000f
- #define PCI_DEVICE_ID_REDHAT_NVME        0x0010
- #define PCI_DEVICE_ID_REDHAT_PVPANIC     0x0011
+--- qemu.orig/qemu/include/hw/pci/pci.h
++++ qemu/qemu/include/hw/pci/pci.h
+@@ -121,6 +121,7 @@ extern bool pci_available;
  #define PCI_DEVICE_ID_REDHAT_ACPI_ERST   0x0012
  #define PCI_DEVICE_ID_REDHAT_UFS         0x0013
  #define PCI_DEVICE_ID_REDHAT_RISCV_IOMMU 0x0014
@@ -782,6 +773,36 @@ Index: b/qemu/include/hw/pci/pci.h
  #define PCI_DEVICE_ID_REDHAT_QXL         0x0100
  
  #define FMT_PCIBUS                      PRIx64
- 
- typedef uint64_t pcibus_t;
- 
+Index: qemu/qemu/meson_options.txt
+===================================================================
+--- qemu.orig/qemu/meson_options.txt
++++ qemu/qemu/meson_options.txt
+@@ -386,3 +386,7 @@ option('rust', type: 'feature', value: '
+        description: 'Rust support')
+ option('strict_rust_lints', type: 'boolean', value: false,
+        description: 'Enable stricter set of Rust warnings')
++
++# cNVMESSD option
++option('pci_epc', type: 'feature', value: 'disabled',
++       description: 'pci endpoint controller support')
+Index: qemu/qemu/scripts/meson-buildoptions.sh
+===================================================================
+--- qemu.orig/qemu/scripts/meson-buildoptions.sh
++++ qemu/qemu/scripts/meson-buildoptions.sh
+@@ -164,6 +164,7 @@ meson_options_help() {
+   printf "%s\n" '  pa              PulseAudio sound support'
+   printf "%s\n" '  parallels       parallels image format support'
+   printf "%s\n" '  passt           passt network backend support'
++  printf "%s\n" '  pci-epc         pci endpoint controller support'
+   printf "%s\n" '  pipewire        PipeWire sound support'
+   printf "%s\n" '  pixman          pixman support'
+   printf "%s\n" '  plugins         TCG plugins via shared library loading'
+@@ -428,6 +429,8 @@ _meson_option_parse() {
+     --disable-parallels) printf "%s" -Dparallels=disabled ;;
+     --enable-passt) printf "%s" -Dpasst=enabled ;;
+     --disable-passt) printf "%s" -Dpasst=disabled ;;
++    --enable-pci-epc) printf "%s" -Dpci_epc=enabled ;;
++    --disable-pci-epc) printf "%s" -Dpci_epc=disabled ;;
+     --enable-pipewire) printf "%s" -Dpipewire=enabled ;;
+     --disable-pipewire) printf "%s" -Dpipewire=disabled ;;
+     --enable-pixman) printf "%s" -Dpixman=enabled ;;

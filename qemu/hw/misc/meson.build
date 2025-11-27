@@ -163,4 +163,4 @@ system_ss.add(when: 'CONFIG_SBSA_REF', if_true: files('sbsa_ec.c'))
 system_ss.add(when: 'CONFIG_LASI', if_true: files('lasi.c'))
 
 # QEMU PCI-Express EPC
-system_ss.add(when: 'CONFIG_QEMU_EPC', if_true: files('qemu-epc.c'))
+system_ss.add(when: 'CONFIG_PCI_EPC', if_true: files('qemu-epc.c'))
