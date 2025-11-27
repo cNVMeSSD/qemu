@@ -1,0 +1,10 @@
+Index: qemu/qemu/subprojects/libvfio-user.wrap
+===================================================================
+--- qemu.orig/qemu/subprojects/libvfio-user.wrap	2025-11-27 14:01:37.946800154 +0100
++++ qemu/qemu/subprojects/libvfio-user.wrap	2025-11-27 14:01:50.707964807 +0100
+@@ -1,4 +1,4 @@
+ [wrap-git]
+ url = https://gitlab.com/qemu-project/libvfio-user.git
+-revision = 0b28d205572c80b568a1003db2c8f37ca333e4d7
++revision = ca9943be5c18ed230f9d4674cc223d1e194f6d23
+ depth = 1
