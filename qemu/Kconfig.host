@@ -64,3 +64,7 @@ config HAVE_RUST
 
 config MAC_PVG
     bool
+
+config PCI_EPC_ALLOWED
+    bool
+    imply PCI_EPC

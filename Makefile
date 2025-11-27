@@ -13,7 +13,8 @@ CONFIGURE_OPTS = \
 	--disable-linux-user \
 	--disable-vnc \
 	--enable-vfio-user-server \
-	--static
+	--enable-pci-epc \
+	--target-list=$(shell uname -m | sed 's/amd64/x86_64/')-softmmu
 
 .PHONY: all clean configure build install package help
 
@@ -47,7 +48,7 @@ package: install
 	cd $(INST_DIR) && \
 	ln -sf qemu-$(VER) opt/qemu && \
 	rm -f ../qemu-build-*.tar.gz && \
-	tar czvf ../qemu-build-$(VER).tar.gz * --exclude=var --owner=0 --group=0
+	tar czvf ../qemu-build-$(VER).tar.gz * --owner=0 --group=0
 
 clean:
 	rm -rf $(BUILD_DIR)

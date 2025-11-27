@@ -226,6 +226,10 @@ have_tpm = get_option('tpm') \
   .require(host_os != 'windows', error_message: 'TPM emulation only available on POSIX systems') \
   .allowed()
 
+pci_epc_allowed = get_option('pci_epc') \
+  .require(vfio_user_server_allowed, error_message: 'pci-epc uses vfio_user_server whch is supported only on Linux') \
+  .allowed()
+
 # vhost
 have_vhost_user = get_option('vhost_user') \
   .disable_auto_if(host_os != 'linux') \
@@ -3343,7 +3347,8 @@ host_kconfig = \
   (multiprocess_allowed ? ['CONFIG_MULTIPROCESS_ALLOWED=y'] : []) + \
   (vfio_user_server_allowed ? ['CONFIG_VFIO_USER_SERVER_ALLOWED=y'] : []) + \
   (hv_balloon ? ['CONFIG_HV_BALLOON_POSSIBLE=y'] : []) + \
-  (have_rust ? ['CONFIG_HAVE_RUST=y'] : [])
+  (have_rust ? ['CONFIG_HAVE_RUST=y'] : []) + \
+  (pci_epc_allowed ? ['CONFIG_PCI_EPC_ALLOWED=y'] : [])
 
 ignored = [ 'TARGET_XML_FILES', 'TARGET_ABI_DIR', 'TARGET_ARCH' ]
 

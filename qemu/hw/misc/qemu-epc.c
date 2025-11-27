@@ -701,7 +701,7 @@ static void qepc_object_set_socket(Object *obj, Visitor *v, const char *name,
 }
 */
 
-static void qepc_class_init(ObjectClass *klass, void *data) {
+static void qepc_class_init(ObjectClass *klass, const void *data) {
   DeviceClass *dc = DEVICE_CLASS(klass);
   PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 

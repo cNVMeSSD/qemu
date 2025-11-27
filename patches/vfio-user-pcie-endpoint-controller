@@ -730,7 +730,7 @@ Index: qemu/qemu/hw/misc/qemu-epc.c
 +}
 +*/
 +
-+static void qepc_class_init(ObjectClass *klass, void *data) {
++static void qepc_class_init(ObjectClass *klass, const void *data) {
 +  DeviceClass *dc = DEVICE_CLASS(klass);
 +  PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 +
@@ -806,3 +806,40 @@ Index: qemu/qemu/scripts/meson-buildoptions.sh
      --enable-pipewire) printf "%s" -Dpipewire=enabled ;;
      --disable-pipewire) printf "%s" -Dpipewire=disabled ;;
      --enable-pixman) printf "%s" -Dpixman=enabled ;;
+Index: qemu/qemu/meson.build
+===================================================================
+--- qemu.orig/qemu/meson.build
++++ qemu/qemu/meson.build
+@@ -226,6 +226,10 @@ have_tpm = get_option('tpm') \
+   .require(host_os != 'windows', error_message: 'TPM emulation only available on POSIX systems') \
+   .allowed()
+ 
++pci_epc_allowed = get_option('pci_epc') \
++  .require(vfio_user_server_allowed, error_message: 'pci-epc uses vfio_user_server whch is supported only on Linux') \
++  .allowed()
++
+ # vhost
+ have_vhost_user = get_option('vhost_user') \
+   .disable_auto_if(host_os != 'linux') \
+@@ -3343,7 +3347,8 @@ host_kconfig = \
+   (multiprocess_allowed ? ['CONFIG_MULTIPROCESS_ALLOWED=y'] : []) + \
+   (vfio_user_server_allowed ? ['CONFIG_VFIO_USER_SERVER_ALLOWED=y'] : []) + \
+   (hv_balloon ? ['CONFIG_HV_BALLOON_POSSIBLE=y'] : []) + \
+-  (have_rust ? ['CONFIG_HAVE_RUST=y'] : [])
++  (have_rust ? ['CONFIG_HAVE_RUST=y'] : []) + \
++  (pci_epc_allowed ? ['CONFIG_PCI_EPC_ALLOWED=y'] : [])
+ 
+ ignored = [ 'TARGET_XML_FILES', 'TARGET_ABI_DIR', 'TARGET_ARCH' ]
+ 
+Index: qemu/qemu/Kconfig.host
+===================================================================
+--- qemu.orig/qemu/Kconfig.host
++++ qemu/qemu/Kconfig.host
+@@ -64,3 +64,7 @@ config HAVE_RUST
+ 
+ config MAC_PVG
+     bool
++
++config PCI_EPC_ALLOWED
++    bool
++    imply PCI_EPC
