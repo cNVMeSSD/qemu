@@ -1,31 +1,107 @@
-Index: qemu/qemu/hw/misc/Kconfig
+Index: qemu/qemu/include/hw/pci/pci.h
 ===================================================================
---- qemu.orig/qemu/hw/misc/Kconfig
-+++ qemu/qemu/hw/misc/Kconfig
-@@ -235,4 +235,8 @@ config IOSB
- config XLNX_VERSAL_TRNG
-     bool
+--- qemu.orig/qemu/include/hw/pci/pci.h
++++ qemu/qemu/include/hw/pci/pci.h
+@@ -121,6 +121,7 @@ extern bool pci_available;
+ #define PCI_DEVICE_ID_REDHAT_ACPI_ERST   0x0012
+ #define PCI_DEVICE_ID_REDHAT_UFS         0x0013
+ #define PCI_DEVICE_ID_REDHAT_RISCV_IOMMU 0x0014
++#define PCI_DEVICE_ID_REDHAT_QEMU_EPC    0x0020
+ #define PCI_DEVICE_ID_REDHAT_QXL         0x0100
  
+ #define FMT_PCIBUS                      PRIx64
+Index: qemu/qemu/meson_options.txt
+===================================================================
+--- qemu.orig/qemu/meson_options.txt
++++ qemu/qemu/meson_options.txt
+@@ -386,3 +386,7 @@ option('rust', type: 'feature', value: '
+        description: 'Rust support')
+ option('strict_rust_lints', type: 'boolean', value: false,
+        description: 'Enable stricter set of Rust warnings')
++
++# cNVMESSD option
++option('pci_epc', type: 'feature', value: 'disabled',
++       description: 'pci endpoint controller support')
+Index: qemu/qemu/scripts/meson-buildoptions.sh
+===================================================================
+--- qemu.orig/qemu/scripts/meson-buildoptions.sh
++++ qemu/qemu/scripts/meson-buildoptions.sh
+@@ -164,6 +164,7 @@ meson_options_help() {
+   printf "%s\n" '  pa              PulseAudio sound support'
+   printf "%s\n" '  parallels       parallels image format support'
+   printf "%s\n" '  passt           passt network backend support'
++  printf "%s\n" '  pci-epc         pci endpoint controller support'
+   printf "%s\n" '  pipewire        PipeWire sound support'
+   printf "%s\n" '  pixman          pixman support'
+   printf "%s\n" '  plugins         TCG plugins via shared library loading'
+@@ -428,6 +429,8 @@ _meson_option_parse() {
+     --disable-parallels) printf "%s" -Dparallels=disabled ;;
+     --enable-passt) printf "%s" -Dpasst=enabled ;;
+     --disable-passt) printf "%s" -Dpasst=disabled ;;
++    --enable-pci-epc) printf "%s" -Dpci_epc=enabled ;;
++    --disable-pci-epc) printf "%s" -Dpci_epc=disabled ;;
+     --enable-pipewire) printf "%s" -Dpipewire=enabled ;;
+     --disable-pipewire) printf "%s" -Dpipewire=disabled ;;
+     --enable-pixman) printf "%s" -Dpixman=enabled ;;
+Index: qemu/qemu/meson.build
+===================================================================
+--- qemu.orig/qemu/meson.build
++++ qemu/qemu/meson.build
+@@ -226,6 +226,10 @@ have_tpm = get_option('tpm') \
+   .require(host_os != 'windows', error_message: 'TPM emulation only available on POSIX systems') \
+   .allowed()
+ 
++pci_epc_allowed = get_option('pci_epc') \
++  .require(vfio_user_server_allowed, error_message: 'pci-epc uses vfio_user_server whch is supported only on Linux') \
++  .allowed()
++
+ # vhost
+ have_vhost_user = get_option('vhost_user') \
+   .disable_auto_if(host_os != 'linux') \
+@@ -3343,7 +3347,8 @@ host_kconfig = \
+   (multiprocess_allowed ? ['CONFIG_MULTIPROCESS_ALLOWED=y'] : []) + \
+   (vfio_user_server_allowed ? ['CONFIG_VFIO_USER_SERVER_ALLOWED=y'] : []) + \
+   (hv_balloon ? ['CONFIG_HV_BALLOON_POSSIBLE=y'] : []) + \
+-  (have_rust ? ['CONFIG_HAVE_RUST=y'] : [])
++  (have_rust ? ['CONFIG_HAVE_RUST=y'] : []) + \
++  (pci_epc_allowed ? ['CONFIG_PCI_EPC_ALLOWED=y'] : [])
+ 
+ ignored = [ 'TARGET_XML_FILES', 'TARGET_ABI_DIR', 'TARGET_ARCH' ]
+ 
+Index: qemu/qemu/Kconfig.host
+===================================================================
+--- qemu.orig/qemu/Kconfig.host
++++ qemu/qemu/Kconfig.host
+@@ -64,3 +64,7 @@ config HAVE_RUST
+ 
+ config MAC_PVG
+     bool
++
++config PCI_EPC_ALLOWED
++    bool
++    imply PCI_EPC
+Index: qemu/qemu/hw/pci/Kconfig
+===================================================================
+--- qemu.orig/qemu/hw/pci/Kconfig
++++ qemu/qemu/hw/pci/Kconfig
+@@ -16,3 +16,5 @@ config MSI_NONBROKEN
+     # or support it and have a good implementation. See commit
+     # 47d2b0f33c664533b8dbd5cb17faa8e6a01afe1f.
+     bool
++
++source epc/Kconfig
+Index: qemu/qemu/hw/pci/epc/Kconfig
+===================================================================
+--- /dev/null
++++ qemu/qemu/hw/pci/epc/Kconfig
+@@ -0,0 +1,3 @@
 +config PCI_EPC
 +    bool
 +    depends on VFIO_USER_SERVER
-+
- source macio/Kconfig
-Index: qemu/qemu/hw/misc/meson.build
-===================================================================
---- qemu.orig/qemu/hw/misc/meson.build
-+++ qemu/qemu/hw/misc/meson.build
-@@ -161,3 +161,6 @@ system_ss.add(when: 'CONFIG_SBSA_REF', i
- 
- # HPPA devices
- system_ss.add(when: 'CONFIG_LASI', if_true: files('lasi.c'))
-+
-+# QEMU PCI-Express EPC
-+system_ss.add(when: 'CONFIG_PCI_EPC', if_true: files('qemu-epc.c'))
-Index: qemu/qemu/hw/misc/qemu-epc.c
+Index: qemu/qemu/hw/pci/epc/epc.c
 ===================================================================
 --- /dev/null
-+++ qemu/qemu/hw/misc/qemu-epc.c
++++ qemu/qemu/hw/pci/epc/epc.c
 @@ -0,0 +1,734 @@
 +/*
 + * QEMU PCI Endpoint Controller device
@@ -761,85 +837,21 @@ Index: qemu/qemu/hw/misc/qemu-epc.c
 +static void qemu_epc_register_type(void) { type_register_static(&qepc_info); }
 +
 +type_init(qemu_epc_register_type);
-Index: qemu/qemu/include/hw/pci/pci.h
+Index: qemu/qemu/hw/pci/epc/meson.build
 ===================================================================
---- qemu.orig/qemu/include/hw/pci/pci.h
-+++ qemu/qemu/include/hw/pci/pci.h
-@@ -121,6 +121,7 @@ extern bool pci_available;
- #define PCI_DEVICE_ID_REDHAT_ACPI_ERST   0x0012
- #define PCI_DEVICE_ID_REDHAT_UFS         0x0013
- #define PCI_DEVICE_ID_REDHAT_RISCV_IOMMU 0x0014
-+#define PCI_DEVICE_ID_REDHAT_QEMU_EPC    0x0020
- #define PCI_DEVICE_ID_REDHAT_QXL         0x0100
+--- /dev/null
++++ qemu/qemu/hw/pci/epc/meson.build
+@@ -0,0 +1,2 @@
++# QEMU PCI-Express EPC
++system_ss.add(when: 'CONFIG_PCI_EPC', if_true: files('epc.c'))
+Index: qemu/qemu/hw/pci/meson.build
+===================================================================
+--- qemu.orig/qemu/hw/pci/meson.build
++++ qemu/qemu/hw/pci/meson.build
+@@ -20,3 +20,5 @@ system_ss.add(when: 'CONFIG_PCI_EXPRESS'
+ system_ss.add_all(when: 'CONFIG_PCI', if_true: pci_ss)
  
- #define FMT_PCIBUS                      PRIx64
-Index: qemu/qemu/meson_options.txt
-===================================================================
---- qemu.orig/qemu/meson_options.txt
-+++ qemu/qemu/meson_options.txt
-@@ -386,3 +386,7 @@ option('rust', type: 'feature', value: '
-        description: 'Rust support')
- option('strict_rust_lints', type: 'boolean', value: false,
-        description: 'Enable stricter set of Rust warnings')
+ system_ss.add(when: 'CONFIG_PCI', if_false: files('pci-stub.c'))
 +
-+# cNVMESSD option
-+option('pci_epc', type: 'feature', value: 'disabled',
-+       description: 'pci endpoint controller support')
-Index: qemu/qemu/scripts/meson-buildoptions.sh
-===================================================================
---- qemu.orig/qemu/scripts/meson-buildoptions.sh
-+++ qemu/qemu/scripts/meson-buildoptions.sh
-@@ -164,6 +164,7 @@ meson_options_help() {
-   printf "%s\n" '  pa              PulseAudio sound support'
-   printf "%s\n" '  parallels       parallels image format support'
-   printf "%s\n" '  passt           passt network backend support'
-+  printf "%s\n" '  pci-epc         pci endpoint controller support'
-   printf "%s\n" '  pipewire        PipeWire sound support'
-   printf "%s\n" '  pixman          pixman support'
-   printf "%s\n" '  plugins         TCG plugins via shared library loading'
-@@ -428,6 +429,8 @@ _meson_option_parse() {
-     --disable-parallels) printf "%s" -Dparallels=disabled ;;
-     --enable-passt) printf "%s" -Dpasst=enabled ;;
-     --disable-passt) printf "%s" -Dpasst=disabled ;;
-+    --enable-pci-epc) printf "%s" -Dpci_epc=enabled ;;
-+    --disable-pci-epc) printf "%s" -Dpci_epc=disabled ;;
-     --enable-pipewire) printf "%s" -Dpipewire=enabled ;;
-     --disable-pipewire) printf "%s" -Dpipewire=disabled ;;
-     --enable-pixman) printf "%s" -Dpixman=enabled ;;
-Index: qemu/qemu/meson.build
-===================================================================
---- qemu.orig/qemu/meson.build
-+++ qemu/qemu/meson.build
-@@ -226,6 +226,10 @@ have_tpm = get_option('tpm') \
-   .require(host_os != 'windows', error_message: 'TPM emulation only available on POSIX systems') \
-   .allowed()
- 
-+pci_epc_allowed = get_option('pci_epc') \
-+  .require(vfio_user_server_allowed, error_message: 'pci-epc uses vfio_user_server whch is supported only on Linux') \
-+  .allowed()
-+
- # vhost
- have_vhost_user = get_option('vhost_user') \
-   .disable_auto_if(host_os != 'linux') \
-@@ -3343,7 +3347,8 @@ host_kconfig = \
-   (multiprocess_allowed ? ['CONFIG_MULTIPROCESS_ALLOWED=y'] : []) + \
-   (vfio_user_server_allowed ? ['CONFIG_VFIO_USER_SERVER_ALLOWED=y'] : []) + \
-   (hv_balloon ? ['CONFIG_HV_BALLOON_POSSIBLE=y'] : []) + \
--  (have_rust ? ['CONFIG_HAVE_RUST=y'] : [])
-+  (have_rust ? ['CONFIG_HAVE_RUST=y'] : []) + \
-+  (pci_epc_allowed ? ['CONFIG_PCI_EPC_ALLOWED=y'] : [])
- 
- ignored = [ 'TARGET_XML_FILES', 'TARGET_ABI_DIR', 'TARGET_ARCH' ]
- 
-Index: qemu/qemu/Kconfig.host
-===================================================================
---- qemu.orig/qemu/Kconfig.host
-+++ qemu/qemu/Kconfig.host
-@@ -64,3 +64,7 @@ config HAVE_RUST
- 
- config MAC_PVG
-     bool
-+
-+config PCI_EPC_ALLOWED
-+    bool
-+    imply PCI_EPC
++subdir('epc')
+\ No newline at end of file

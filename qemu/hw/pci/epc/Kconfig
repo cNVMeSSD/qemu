@@ -1,0 +1,3 @@
+config PCI_EPC
+    bool
+    depends on VFIO_USER_SERVER
