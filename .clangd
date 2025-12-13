@@ -4,10 +4,6 @@ CompileFlags:
 Index:
   Background: Build
 
-Diagnostics:
-  UnusedIncludes: Strict
-  MissingIncludes: Strict
-
 Completion:
   AllScopes: Yes
 
