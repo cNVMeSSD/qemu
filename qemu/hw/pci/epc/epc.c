@@ -52,7 +52,8 @@
 /* Uncomment to enable verbose debug logging for this device. */
 #define DEBUG_QEMU_EPC
 #ifdef DEBUG_QEMU_EPC
-/* Lightweight debug logging helper, compiled out when DEBUG_QEMU_EPC is unset. */
+/* Lightweight debug logging helper, compiled out when DEBUG_QEMU_EPC is unset.
+ */
 #define qemu_epc_debug(fmt, ...) qemu_log("qemu_epc: " fmt "\n", ##__VA_ARGS__)
 #else
 #define qemu_epc_debug(...)                                                    \
@@ -83,6 +84,7 @@
  *  - The various MemoryRegion objects that represent MMIO regions and the
  *    outbound window aperture.
  */
+
 struct QEPCState {
   /*< private >*/
   /* Underlying QEMU PCI device (must be first for PCIDeviceClass). */
@@ -114,7 +116,7 @@ struct QEPCState {
   struct {
     uint64_t phys_addr; /* System physical address backing this BAR. */
     uint64_t size;      /* Size of the BAR aperture in bytes. */
-    uint8_t flags;      /* Implementation-defined flags (e.g., IO/MEM, prefetch). */
+    uint8_t flags; /* Implementation-defined flags (e.g., IO/MEM, prefetch). */
   } bars[6];
 
   /*
@@ -136,8 +138,8 @@ struct QEPCState {
    *  - pci:  PCI address as seen by the vfio-user client,
    *  - size: size of the window in bytes.
    */
-   /* TODO: Remove the stale commented-out register definitions above once the
-    *       enum-based layout is stable and documented externally. */
+  /* TODO: Remove the stale commented-out register definitions above once the
+   *       enum-based layout is stable and documented externally. */
   struct {
     uint64_t phys;
     uint64_t pci;
@@ -178,7 +180,8 @@ OBJECT_DECLARE_SIMPLE_TYPE(QEPCState, QEMU_EPC)
 /*
  * BAR indices exposed to the guest:
  *   QEPC_BAR_CTRL       - Control and status registers for the EPC.
- *   QEPC_BAR_PCI_CFG    - MMIO view of PCIe config space (backed by pcie_config).
+ *   QEPC_BAR_PCI_CFG    - MMIO view of PCIe config space (backed by
+ *                         pcie_config).
  *   QEPC_BAR_BAR_CFG    - MMIO interface to configure EPC BARs.
  *   QEPC_BAR_OB_WINDOWS - Outbound window aperture.
  */
@@ -441,8 +444,8 @@ static void qepc_vfu_run(void *opaque) {
                        __func__);
         break;
       } else {
-        qemu_epc_debug("%s: vfu_run_ctx failed: err=%d errno=%d",
-                       __func__, err, errno);
+        qemu_epc_debug("%s: vfu_run_ctx failed: err=%d errno=%d", __func__, err,
+                       errno);
         break;
       }
     } else {
@@ -542,8 +545,7 @@ static ssize_t qepc_bar_access(vfu_ctx_t *vfu_ctx, uint8_t barno,
   dma_addr_t addr;
 
   qemu_epc_debug("%s: bar=%u offset=0x%lx size=0x%zx %s", __func__, barno,
-                 (unsigned long)offset, count,
-                 is_write ? "write" : "read");
+                 (unsigned long)offset, count, is_write ? "write" : "read");
 
   if (barno >= PCI_NUM_REGIONS) {
     qemu_epc_debug("%s: invalid BAR %u", __func__, barno);
@@ -561,9 +563,10 @@ static ssize_t qepc_bar_access(vfu_ctx_t *vfu_ctx, uint8_t barno,
    * reject out-of-bounds accesses to avoid undefined behaviour.
    */
   if (offset < 0 || (uint64_t)offset + count > s->bars[barno].size) {
-    qemu_epc_debug("%s: BAR %u out-of-bounds (off=0x%lx, size=0x%zx, bar_size=0x%lx)",
-                   __func__, barno, (unsigned long)offset, count,
-                   (unsigned long)s->bars[barno].size);
+    qemu_epc_debug(
+        "%s: BAR %u out-of-bounds (off=0x%lx, size=0x%zx, bar_size=0x%lx)",
+        __func__, barno, (unsigned long)offset, count,
+        (unsigned long)s->bars[barno].size);
     return -1;
   }
 
@@ -625,8 +628,8 @@ static void qepc_dma_register(vfu_ctx_t *vfu_ctx, vfu_dma_info_t *info) {
   QEPCState *s = vfu_get_private(vfu_ctx);
 
   qemu_epc_debug(
-      "%s: register iova=[0x%lx..0x%lx) len=0x%lx vaddr=%p prot=0x%x",
-      __func__, (uint64_t)info->iova.iov_base,
+      "%s: register iova=[0x%lx..0x%lx) len=0x%lx vaddr=%p prot=0x%x", __func__,
+      (uint64_t)info->iova.iov_base,
       (uint64_t)info->iova.iov_base + info->iova.iov_len,
       (uint64_t)info->iova.iov_len, info->vaddr, info->prot);
 
@@ -638,9 +641,8 @@ static void qepc_dma_register(vfu_ctx_t *vfu_ctx, vfu_dma_info_t *info) {
 
   if (s->rc_mr_idx == SUPPORT_RC_NUM_MRS) {
     /* TODO: Grow this table dynamically or fail the DMA registration. */
-    qemu_epc_debug(
-        "%s: unsupported: rc_mrs table full (%d entries, max=%d)",
-        __func__, s->rc_mr_idx, SUPPORT_RC_NUM_MRS);
+    qemu_epc_debug("%s: unsupported: rc_mrs table full (%d entries, max=%d)",
+                   __func__, s->rc_mr_idx, SUPPORT_RC_NUM_MRS);
     return;
   }
 
@@ -649,11 +651,11 @@ static void qepc_dma_register(vfu_ctx_t *vfu_ctx, vfu_dma_info_t *info) {
       .size = info->iova.iov_len,
       .vaddr = info->vaddr,
   };
-  qemu_epc_debug(
-      "%s: stored rc_mrs[%d]: rc_phys=0x%lx size=0x%lx vaddr=%p",
-      __func__, s->rc_mr_idx, (unsigned long)s->rc_mrs[s->rc_mr_idx].rc_phys,
-      (unsigned long)s->rc_mrs[s->rc_mr_idx].size,
-      s->rc_mrs[s->rc_mr_idx].vaddr);
+  qemu_epc_debug("%s: stored rc_mrs[%d]: rc_phys=0x%lx size=0x%lx vaddr=%p",
+                 __func__, s->rc_mr_idx,
+                 (unsigned long)s->rc_mrs[s->rc_mr_idx].rc_phys,
+                 (unsigned long)s->rc_mrs[s->rc_mr_idx].size,
+                 s->rc_mrs[s->rc_mr_idx].vaddr);
 
   s->rc_mr_idx++;
 }
@@ -673,11 +675,10 @@ static void qepc_dma_register(vfu_ctx_t *vfu_ctx, vfu_dma_info_t *info) {
 static void qepc_dma_unregister(vfu_ctx_t *vfu_ctx, vfu_dma_info_t *info) {
   QEPCState *s = vfu_get_private(vfu_ctx);
 
-  qemu_epc_debug(
-      "%s: unregister iova=[0x%lx..0x%lx) len=0x%lx vaddr=%p",
-      __func__, (uint64_t)info->iova.iov_base,
-      (uint64_t)info->iova.iov_base + info->iova.iov_len,
-      (uint64_t)info->iova.iov_len, info->vaddr);
+  qemu_epc_debug("%s: unregister iova=[0x%lx..0x%lx) len=0x%lx vaddr=%p",
+                 __func__, (uint64_t)info->iova.iov_base,
+                 (uint64_t)info->iova.iov_base + info->iova.iov_len,
+                 (uint64_t)info->iova.iov_len, info->vaddr);
 
   /* TODO: remove from rc_mrs[] and log which slot was reclaimed. */
   (void)s;
@@ -722,6 +723,7 @@ static int qepc_ctrl_handle_start(QEPCState *s, uint64_t val) {
     return -1;
   }
 
+  qemu_epc_debug("%s: setting up PCI config space region", __func__);
   err = vfu_setup_region(s->vfu, VFU_PCI_DEV_CFG_REGION_IDX,
                          PCIE_CONFIG_SPACE_SIZE, &qepc_pci_cfg_access,
                          VFU_REGION_FLAG_RW | VFU_REGION_FLAG_ALWAYS_CB, NULL,
@@ -731,11 +733,17 @@ static int qepc_ctrl_handle_start(QEPCState *s, uint64_t val) {
                    __func__, err, errno);
     return -1;
   }
+  qemu_epc_debug("%s: PCI config space region setup complete", __func__);
 
   // setup bars
+  qemu_epc_debug("%s: setting up BAR regions (bar_mask=0x%x)", __func__,
+                 s->bar_mask);
   for (int i = 0; i < PCI_NUM_REGIONS; i++) {
-
+    /* Skip BARs that aren't enabled in the bar_mask (configured via BAR_CFG).
+     */
     if (!(s->bar_mask & (1 << i))) {
+      qemu_epc_debug("%s: skipping disabled BAR %d (not set in bar_mask=0x%x)",
+                     __func__, i, s->bar_mask);
       continue;
     }
 
@@ -754,7 +762,9 @@ static int qepc_ctrl_handle_start(QEPCState *s, uint64_t val) {
           __func__, i, err, errno);
       return -1;
     }
+    qemu_epc_debug("%s: BAR %d region setup complete", __func__, i);
   }
+  qemu_epc_debug("%s: all BAR regions setup complete", __func__);
 
   // setup irqs
   /* TODO: Add support for MSI/MSI-X if needed by the endpoint. */
@@ -775,8 +785,8 @@ static int qepc_ctrl_handle_start(QEPCState *s, uint64_t val) {
 
   err = vfu_realize_ctx(s->vfu);
   if (err) {
-    qemu_epc_debug("%s: failed at vfu_realize_ctx (err=%d errno=%d)",
-                   __func__, err, errno);
+    qemu_epc_debug("%s: failed at vfu_realize_ctx (err=%d errno=%d)", __func__,
+                   err, errno);
     return -1;
   }
 
@@ -859,10 +869,10 @@ static void qepc_handle_enable_disale_ob(QEPCState *s, uint64_t val) {
       s->ob_mask &= ~bit;
       continue;
     } else {
-      qemu_epc_debug("%s: enabling ob window %d (phys=0x%lx pci=0x%lx size=0x%lx)",
-                     __func__, i, (unsigned long)s->obs[i].phys,
-                     (unsigned long)s->obs[i].pci,
-                     (unsigned long)s->obs[i].size);
+      qemu_epc_debug(
+          "%s: enabling ob window %d (phys=0x%lx pci=0x%lx size=0x%lx)",
+          __func__, i, (unsigned long)s->obs[i].phys,
+          (unsigned long)s->obs[i].pci, (unsigned long)s->obs[i].size);
     }
 
     /*
@@ -889,10 +899,11 @@ static void qepc_handle_enable_disale_ob(QEPCState *s, uint64_t val) {
         uint64_t size = s->obs[i].size;
 
         // sprintf(s->rc_local_mr_name, "qemu-epc/rc-local-%d", 0);
-        /* TODO: Use i as index instead of 0 once per-window mappings are supported. */
-        qemu_epc_debug("%s: mapping ob window %d using rc_mrs[%d]: rc_phys=0x%lx off=0x%lx size=0x%lx start=%p",
-                       __func__, i, j,
-                       (unsigned long)s->rc_mrs[j].rc_phys,
+        /* TODO: Use i as index instead of 0 once per-window mappings are
+         * supported. */
+        qemu_epc_debug("%s: mapping ob window %d using rc_mrs[%d]: "
+                       "rc_phys=0x%lx off=0x%lx size=0x%lx start=%p",
+                       __func__, i, j, (unsigned long)s->rc_mrs[j].rc_phys,
                        (unsigned long)off, (unsigned long)size, start);
 
         memory_region_init_ram_ptr(&s->rc_local_mr[0], OBJECT(s),
@@ -916,9 +927,10 @@ static void qepc_handle_enable_disale_ob(QEPCState *s, uint64_t val) {
       }
     }
 
-    qemu_epc_debug("%s: no matching RC MR for ob window %d (pci=0x%lx size=0x%lx)",
-                   __func__, i, (unsigned long)s->obs[i].pci,
-                   (unsigned long)s->obs[i].size);
+    qemu_epc_debug(
+        "%s: no matching RC MR for ob window %d (pci=0x%lx size=0x%lx)",
+        __func__, i, (unsigned long)s->obs[i].pci,
+        (unsigned long)s->obs[i].size);
   }
 done:
   qemu_epc_debug("%s: final ob_mask=0x%x", __func__, s->ob_mask);
@@ -989,8 +1001,8 @@ static void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     break;
   case QEPC_CTRL_OFF_OB_PHYS:
     if (s->ob_idx >= NUM_OB_WINDOW) {
-      qemu_epc_debug("%s: write to OB_PHYS with invalid ob_idx %u",
-                     __func__, s->ob_idx);
+      qemu_epc_debug("%s: write to OB_PHYS with invalid ob_idx %u", __func__,
+                     s->ob_idx);
       return;
     }
     tmp = s->obs[s->ob_idx].phys;
@@ -1010,8 +1022,8 @@ static void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     break;
   case QEPC_CTRL_OFF_OB_PCI:
     if (s->ob_idx >= NUM_OB_WINDOW) {
-      qemu_epc_debug("%s: write to OB_PCI with invalid ob_idx %u",
-                     __func__, s->ob_idx);
+      qemu_epc_debug("%s: write to OB_PCI with invalid ob_idx %u", __func__,
+                     s->ob_idx);
       return;
     }
     tmp = s->obs[s->ob_idx].pci;
@@ -1020,8 +1032,8 @@ static void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     break;
   case QEPC_CTRL_OFF_OB_PCI + sizeof(uint32_t):
     if (s->ob_idx >= NUM_OB_WINDOW) {
-      qemu_epc_debug("%s: write to OB_PCI[hi] with invalid ob_idx %u",
-                     __func__, s->ob_idx);
+      qemu_epc_debug("%s: write to OB_PCI[hi] with invalid ob_idx %u", __func__,
+                     s->ob_idx);
       return;
     }
     tmp = s->obs[s->ob_idx].pci;
@@ -1031,8 +1043,8 @@ static void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     break;
   case QEPC_CTRL_OFF_OB_SIZE:
     if (s->ob_idx >= NUM_OB_WINDOW) {
-      qemu_epc_debug("%s: write to OB_SIZE with invalid ob_idx %u",
-                     __func__, s->ob_idx);
+      qemu_epc_debug("%s: write to OB_SIZE with invalid ob_idx %u", __func__,
+                     s->ob_idx);
       return;
     }
     tmp = s->obs[s->ob_idx].size;
@@ -1217,65 +1229,56 @@ static void qepc_realize(PCIDevice *pci_dev, Error **errp) {
     return;
   }
 
+  qemu_epc_debug(
+      "initializing control BAR memory region: size=0x%lx (raw=0x%x)",
+      (unsigned long)pow2ceil(QEPC_CTRL_SIZE), QEPC_CTRL_SIZE);
+  memory_region_init_io(&s->ctrl_mr, OBJECT(s), &qepc_ctrl_mmio_ops, s,
+                        "qemu-epc/ctrl", pow2ceil(QEPC_CTRL_SIZE));
+
   /*
    * Allocate page-aligned backing for PCIe config space so that it can be
    * safely mapped as RAM by KVM without triggering alignment errors.
    */
+  qemu_epc_debug(
+      "requesting UA-aligned PCI config space memory region: size=0x%lx ptr=%p",
+      (unsigned long)PCIE_CONFIG_SPACE_SIZE, s->pcie_config);
   size_t page_size = qemu_real_host_page_size();
-  if (PCIE_CONFIG_SPACE_SIZE % page_size != 0) {
-    qemu_epc_debug("%s: PCIE_CONFIG_SPACE_SIZE (0x%zx) is not a multiple of "
-                   "host page size (0x%zx)", __func__,
-                   (size_t)PCIE_CONFIG_SPACE_SIZE, page_size);
-    error_setg(errp,
-               "qemu-epc: PCIE_CONFIG_SPACE_SIZE is not page-size aligned");
-    return;
-  }
-
   s->pcie_config = qemu_memalign(page_size, PCIE_CONFIG_SPACE_SIZE);
   if (!s->pcie_config) {
-    error_setg(errp, "qemu-epc: failed to allocate pcie_config");
+    error_setg(errp, "qemu-epc: failed to allocate PCI config space");
     return;
   }
-  memset(s->pcie_config, 0, PCIE_CONFIG_SPACE_SIZE);
 
-  /*
-   * Initialize vfio-user related state. The vfio-user context itself is
-   * created lazily when the guest writes to QEPC_CTRL_OFF_START.
-   */
-  qemu_epc_debug("initializing ctrl_mr");
-  memory_region_init_io(&s->ctrl_mr, OBJECT(s), &qepc_ctrl_mmio_ops, s,
-                        "qemu-epc/ctrl", pow2ceil(QEPC_CTRL_SIZE));
-
-  qemu_epc_debug("initializing pci_cfg_mr");
+  qemu_epc_debug(
+      "initializing PCI config space memory region: size=0x%lx ptr=%p",
+      (unsigned long)PCIE_CONFIG_SPACE_SIZE, s->pcie_config);
   memory_region_init_ram_ptr(&s->pci_cfg_mr, OBJECT(s), "qemu-epc/cfg-cfg",
                              PCIE_CONFIG_SPACE_SIZE, s->pcie_config);
 
-  qemu_epc_debug("initializing bar_cfg_mr");
+  qemu_epc_debug("initializing BAR config memory region: size=0x%lx (raw=0x%x)",
+                 (unsigned long)pow2ceil(QEPC_BAR_CFG_SIZE), QEPC_BAR_CFG_SIZE);
   memory_region_init_io(&s->bar_cfg_mr, OBJECT(s), &qemu_epc_mmio_bar_cfg_ops,
                         s, "qemu-epc/bar-cfg", pow2ceil(QEPC_BAR_CFG_SIZE));
 
-  qemu_epc_debug("initializing ob_window_mr");
+  qemu_epc_debug("initializing outbound window memory region: size=0x%lx "
+                 "(windows=%d window_size=0x%llx)",
+                 (unsigned long)pow2ceil(NUM_OB_WINDOW * OB_WINDOW_SIZE),
+                 NUM_OB_WINDOW, (unsigned long long)OB_WINDOW_SIZE);
   memory_region_init(&s->ob_window_mr, NULL, "qemu-epc/ob",
                      pow2ceil(NUM_OB_WINDOW * OB_WINDOW_SIZE));
-  qemu_epc_debug("registering BAR %d (ctrl)", QEPC_BAR_CTRL);
+
   pci_register_bar(pci_dev, QEPC_BAR_CTRL, PCI_BASE_ADDRESS_MEM_TYPE_32,
                    &s->ctrl_mr);
-  qemu_epc_debug("registering BAR %d (pci_cfg)", QEPC_BAR_PCI_CFG);
+
   pci_register_bar(pci_dev, QEPC_BAR_PCI_CFG, PCI_BASE_ADDRESS_SPACE_MEMORY,
                    &s->pci_cfg_mr);
-  qemu_epc_debug("registering BAR %d (bar_cfg)", QEPC_BAR_BAR_CFG);
+
   pci_register_bar(pci_dev, QEPC_BAR_BAR_CFG, PCI_BASE_ADDRESS_SPACE_MEMORY,
                    &s->bar_cfg_mr);
 
-  qemu_epc_debug("registering BAR %d (ob_windows)", QEPC_BAR_OB_WINDOWS);
   pci_register_bar(pci_dev, QEPC_BAR_OB_WINDOWS, PCI_BASE_ADDRESS_MEM_TYPE_64,
                    &s->ob_window_mr);
 
-  qemu_epc_debug("device memory realized and pinned");
-  qemu_epc_debug(
-      "%s: initial state: sock_path=%s bar_mask=0x%x ob_mask=0x%x rc_mr_idx=%d",
-      __func__, s->sock_path ? s->sock_path : "<unset>", s->bar_mask,
-      s->ob_mask, s->rc_mr_idx);
   /*
    * TODO: Implement a corresponding .exit callback that:
    *   - Tears down the vfio-user context if it was created,
