@@ -155,7 +155,10 @@ struct QEPCState {
   /*
    * Root complex (RC) DMA mappings registered by the vfio-user client.
    * rc_phys is the client's IOVA/RC physical address,
-   * vaddr is the local virtual address backing the region in this process,
+   * vaddr is the local virtual address backing the region in this process.
+   *
+   * vaddr may be NULL if the client registered the region without mapping it
+   * into this process; in that case, accesses are not supported.
    * size is the region length.
    */
   struct rc_mr {
@@ -167,6 +170,13 @@ struct QEPCState {
   int rc_mr_idx;
 
   MemoryRegion rc_local_mr[NUM_OB_WINDOW];
+
+  /*
+   * Tracks whether an outbound window is currently mapped via a fast-path
+   * local MemoryRegion (rc_local_mr[i]). When false, accesses must go
+   * through the slow-path helpers qepc_rc_dma_read/qepc_rc_dma_write.
+   */
+  bool ob_fast_mapped[NUM_OB_WINDOW];
 };
 
 /* QOM type name for this device. */
@@ -216,20 +226,6 @@ enum {
 
   QEPC_CTRL_SIZE = QEPC_CTRL_OFF_OB_SIZE + sizeof(uint64_t)
 };
-
-/*
-#define QEPC_CTRL_OFF_START (0x00)
-#define QEPC_CTRL_OFF_WIN_START (0x08)
-#define QEPC_CTRL_OFF_WIN_SIZE (0x10)
-#define QEPC_CTRL_OFF_IRQ_TYPE (0x18)
-#define QEPC_CTRL_OFF_IRQ_NUM (0x1c)
-#define QEPC_CTRL_OFF_OB_IDX (0x20)
-#define QEPC_CTRL_OFF_OB_FLAG (0x24)
-#define QEPC_CTRL_OFF_OB_PHYS (0x28)
-#define QEPC_CTRL_OFF_OB_PCI (0x30)
-#define QEPC_CTRL_OFF_OB_SIZE (0x38)
-#define QEPC_CTRL_SIZE (QEPC_CTRL_OFF_OB_SIZE + sizeof(uint64_t))
-*/
 
 /*
  * qepc_ctrl_mmio_read
@@ -370,49 +366,6 @@ static ssize_t qepc_pci_cfg_access(vfu_ctx_t *vfu_ctx, char *const buf,
 }
 
 /*
-static void *qepc_thread(void *opaque) {
-  int err;
-  kjkQEPCState *s = opaque;
-kj
-  qemu_epc_debug("start thread vfu thread");
-
-  // TODO: Validate sock_path correctness before creating the context.
-  s->vfu = vfu_create_ctx(VFU_TRANS_SOCK, s->sock_path,
-                          LIBVFIO_USER_FLAG_ATTACH_NB, s, VFU_DEV_TYPE_PCI);
-  if (!s->vfu) {
-    return NULL;
-  }
-
-  err = vfu_pci_init(s->vfu, VFU_PCI_TYPE_EXPRESS, PCI_HEADER_TYPE_NORMAL, 0);
-  if (err) {
-    return NULL;
-  }
-
-  // Expose PCI config space to the vfio-user client.
-  err = vfu_setup_region(s->vfu, VFU_PCI_DEV_CFG_REGION_IDX,
-                         PCIE_CONFIG_SPACE_SIZE, &qepc_pci_cfg_access,
-                         VFU_REGION_FLAG_RW | VFU_REGION_FLAG_ALWAYS_CB, NULL,
-                         0, -1, 0);
-  if (err) {
-    qemu_epc_debug("failed at vfu_setup_region");
-    return NULL;
-  }
-  // setup bars
-  // setup irqs
-  // vfu_realize_ctx
-  err = vfu_realize_ctx(s->vfu);
-  if (err) {
-    qemu_epc_debug("failed at vfu_realize_ctx");
-    return NULL;
-  }
-  // vfu_get_poll_fd
-  // qemu_set_fd_handler(pollfd, );
-
-  return NULL;
-}
-*/
-
-/*
  * qepc_vfu_run
  *
  * Event loop callback used by QEMU's fd handler to drive the vfio-user
@@ -425,7 +378,6 @@ kj
  * TODO: Consider integrating with QEMU's event loop more tightly to detect
  *       and handle backend errors in a more structured way.
  */
-/* Forward declaration so qepc_vfu_attach_ctx can reference this callback. */
 static void qepc_vfu_run(void *opaque) {
   QEPCState *s = opaque;
   int err = -1;
@@ -634,8 +586,7 @@ static void qepc_dma_register(vfu_ctx_t *vfu_ctx, vfu_dma_info_t *info) {
       (uint64_t)info->iova.iov_len, info->vaddr, info->prot);
 
   if (!info->vaddr) {
-    /* TODO: Support non-host-mapped DMA regions if needed. */
-    qemu_epc_debug("%s: unsupported: vaddr is NULL", __func__);
+    qemu_epc_debug("%s: shared memory is required: vaddr is NULL", __func__);
     return;
   }
 
@@ -684,8 +635,7 @@ static void qepc_dma_unregister(vfu_ctx_t *vfu_ctx, vfu_dma_info_t *info) {
   (void)s;
 }
 
-/*
- * qepc_ctrl_handle_start
+/* qepc_ctrl_handle_start
  *
  * Handles a write to the QEPC_CTRL_OFF_START register.
  *
@@ -841,7 +791,7 @@ static void qepc_handle_ctrl_irq(QEPCState *s, int irq_num) {
  *     always using index 0.
  *   - Add bounds checking on ob_idx and validate obs[] entries.
  */
-static void qepc_handle_enable_disale_ob(QEPCState *s, uint64_t val) {
+static void qepc_handle_enable_disable_ob(QEPCState *s, uint64_t val) {
   uint8_t prev = s->ob_mask;
 
   /*
@@ -867,6 +817,8 @@ static void qepc_handle_enable_disale_ob(QEPCState *s, uint64_t val) {
                      __func__, i);
       /* For now, just clear the bit in the software mask. */
       s->ob_mask &= ~bit;
+      qemu_epc_debug("%s: ob window %d disabled, ob_mask=0x%x", __func__, i,
+                     s->ob_mask);
       continue;
     } else {
       qemu_epc_debug(
@@ -989,7 +941,7 @@ static void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     qepc_handle_ctrl_irq(s, val);
     break;
   case QEPC_CTRL_OFF_OB_MASK:
-    qepc_handle_enable_disale_ob(s, val);
+    qepc_handle_enable_disable_ob(s, val);
     break;
   case QEPC_CTRL_OFF_OB_IDX:
     if (val >= NUM_OB_WINDOW) {
@@ -1304,22 +1256,6 @@ static void qepc_object_set_path(Object *obj, const char *str, Error **errp) {
   qemu_epc_debug("socket path: %s", str);
   s->sock_path = g_strdup(str);
 }
-
-/*
-static void qepc_object_set_socket(Object *obj, Visitor *v, const char *name,
-                                   void *opaque, Error **errp) {
-  QEPCState *s = QEMU_EPC(obj);
-
-  visit_type_SocketAddress(v, name, &s->socket, errp);
-  if (s->socket->type != SOCKET_ADDRESS_TYPE_UNIX) {
-    error_setg(errp, "qemu-epc: Unsupported socket type - %s",
-               SocketAddressType_str(s->socket->type));
-
-    s->socket = NULL;
-    return;
-  }
-}
-*/
 
 /*
  * qepc_class_init
