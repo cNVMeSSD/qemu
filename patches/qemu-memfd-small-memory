@@ -1,0 +1,38 @@
+Index: qemu/qemu/system/physmem.c
+===================================================================
+--- qemu.orig/qemu/system/physmem.c
++++ qemu/qemu/system/physmem.c
+@@ -1887,9 +1887,32 @@ static void ram_block_add(RAMBlock *new_
+                 return;
+             }
+         } else {
+-            new_block->host = qemu_anon_ram_alloc(new_block->max_length,
++            /* --- START PATCH --- */
++            /* 1. Try to allocate using memfd to ensure we get a file descriptor */
++            int fd = qemu_memfd_create(new_block->mr->name ? new_block->mr->name : "anon-ram",
++                                       new_block->max_length + new_block->mr->align,
++                                       0, 0, 0, NULL);
++
++            if (fd >= 0) {
++                /* 2. Map the memfd as SHARED memory */
++                new_block->host = mmap(NULL, new_block->max_length,
++                                       PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++                if (new_block->host == MAP_FAILED) {
++                    close(fd);
++                    new_block->host = NULL;
++                } else {
++                    new_block->fd = fd;
++                    new_block->flags |= RAM_SHARED;
++                }
++            }
++
++            /* 3. Fallback to standard allocation if memfd failed */
++            if (!new_block->host) {
++                new_block->host = qemu_anon_ram_alloc(new_block->max_length,
+                                                   &new_block->mr->align,
+                                                   shared, noreserve);
++            }
++            /* --- END PATCH --- */
+             if (!new_block->host) {
+                 error_setg_errno(errp, errno,
+                                  "cannot set up guest memory '%s'",

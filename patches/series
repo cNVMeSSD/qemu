@@ -1,2 +1,3 @@
 libvfio-user-gcc-14
+qemu-memfd-small-memory
 vfio-user-pcie-endpoint-controller
