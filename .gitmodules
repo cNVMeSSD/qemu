@@ -1,0 +1,45 @@
+[submodule "qemu/roms/seabios"]
+	path = qemu/roms/seabios
+	url = https://gitlab.com/qemu-project/seabios.git/
+[submodule "qemu/roms/SLOF"]
+	path = qemu/roms/SLOF
+	url = https://gitlab.com/qemu-project/SLOF.git
+[submodule "qemu/roms/ipxe"]
+	path = qemu/roms/ipxe
+	url = https://gitlab.com/qemu-project/ipxe.git
+[submodule "qemu/roms/openbios"]
+	path = qemu/roms/openbios
+	url = https://gitlab.com/qemu-project/openbios.git
+[submodule "qemu/roms/qemu-palcode"]
+	path = qemu/roms/qemu-palcode
+	url = https://gitlab.com/qemu-project/qemu-palcode.git
+[submodule "qemu/roms/u-boot"]
+	path = qemu/roms/u-boot
+	url = https://gitlab.com/qemu-project-mirrors/u-boot.git
+[submodule "qemu/roms/skiboot"]
+	path = qemu/roms/skiboot
+	url = https://gitlab.com/qemu-project/skiboot.git
+[submodule "qemu/roms/QemuMacDrivers"]
+	path = qemu/roms/QemuMacDrivers
+	url = https://gitlab.com/qemu-project/QemuMacDrivers.git
+[submodule "qemu/roms/seabios-hppa"]
+	path = qemu/roms/seabios-hppa
+	url = https://gitlab.com/qemu-project/seabios-hppa.git
+[submodule "qemu/roms/u-boot-sam460ex"]
+	path = qemu/roms/u-boot-sam460ex
+	url = https://gitlab.com/qemu-project-mirrors/u-boot-sam460ex.git
+[submodule "qemu/roms/edk2"]
+	path = qemu/roms/edk2
+	url = https://gitlab.com/qemu-project/edk2.git
+[submodule "qemu/roms/opensbi"]
+	path = qemu/roms/opensbi
+	url = 	https://gitlab.com/qemu-project/opensbi.git
+[submodule "qemu/roms/qboot"]
+	path = qemu/roms/qboot
+	url = https://gitlab.com/qemu-project/qboot.git
+[submodule "qemu/roms/vbootrom"]
+	path = qemu/roms/vbootrom
+	url = https://gitlab.com/qemu-project/vbootrom.git
+[submodule "qemu/tests/lcitool/libvirt-ci"]
+	path = qemu/tests/lcitool/libvirt-ci
+	url = https://gitlab.com/libvirt/libvirt-ci.git
