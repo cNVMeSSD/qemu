@@ -286,6 +286,8 @@ static ssize_t qepc_pci_cfg_access_bar(QEPCState *s, char *const buf,
                                        size_t count, loff_t offset,
                                        const bool is_write) {
   uint32_t t1, t2;
+  int bar_index;
+  bool is_high_dword = false;
 
   qemu_epc_debug("%s: %s: offset 0x%lx, size 0x%lx", __func__,
                  is_write ? "write" : "read", offset, count);
@@ -293,32 +295,82 @@ static ssize_t qepc_pci_cfg_access_bar(QEPCState *s, char *const buf,
   /* BAR registers are always 32-bit wide. */
   assert(count == sizeof(uint32_t));
 
+  /*
+   * Map config-space offset to BAR index:
+   *   0x10/0x14 -> BAR0 low/high
+   *   0x18/0x1c -> BAR2 low/high
+   *   0x20/0x24 -> BAR4 low/high
+   *
+   * This aligns with how Linux treats 64-bit BARs as pairs.
+   */
+  switch (offset) {
+  case 0x10:
+    bar_index = 0;
+    is_high_dword = false;
+    break;
+  case 0x14:
+    bar_index = 0;
+    is_high_dword = true;
+    break;
+  case 0x18:
+    bar_index = 2;
+    is_high_dword = false;
+    break;
+  case 0x1c:
+    bar_index = 2;
+    is_high_dword = true;
+    break;
+  case 0x20:
+    bar_index = 4;
+    is_high_dword = false;
+    break;
+  case 0x24:
+    bar_index = 4;
+    is_high_dword = true;
+    break;
+  default:
+    bar_index = -1;
+    break;
+  }
+
   if (is_write) {
-    switch (offset) {
-    case 0x10: // BAR 0
-      memcpy(&t1, buf, sizeof(t1));
-      /* Mask according to BAR0 size; emulate PCI BAR size probing. */
-      t2 = (~(uint32_t)s->bars[0].size + 1) & t1;
+    memcpy(&t1, buf, sizeof(t1));
+
+    if (bar_index >= 0 && !is_high_dword) {
+      /*
+       * Low dword write: apply size-masking semantics expected by PCI,
+       * i.e. emulate the standard BAR size probing behavior.
+       */
+      uint32_t size = (uint32_t)s->bars[bar_index].size;
+
+      if (size) {
+        t2 = (~size + 1) & t1;
+      } else {
+        /* If size is not programmed yet, just store what the host wrote. */
+        t2 = t1;
+      }
+
       memcpy(s->pcie_config + offset, &t2, sizeof(t2));
-      break;
-    case 0x18: // BAR 2
-      memcpy(&t1, buf, sizeof(t1));
-      /* Mask according to BAR2 size; emulate PCI BAR size probing. */
-      t2 = (~(uint32_t)s->bars[2].size + 1) & t1;
-      memcpy(s->pcie_config + offset, &t2, sizeof(t2));
-      break;
-    case 0x20: // BAR 4
-      memcpy(&t1, buf, sizeof(t1));
-      /* Mask according to BAR4 size; emulate PCI BAR size probing. */
-      t2 = (~(uint32_t)s->bars[4].size + 1) & t1;
-      memcpy(s->pcie_config + offset, &t2, sizeof(t2));
-      break;
-    default:
+      qemu_epc_debug("BAR%d low write: host=0x%x stored=0x%x size=0x%x",
+                     bar_index, t1, t2, size);
+    } else if (bar_index >= 0 && is_high_dword) {
+      /*
+       * High dword write of a 64-bit BAR: the host owns this value.
+       * We simply store and return it verbatim. Masking is not applied
+       * to the high 32 bits.
+       */
+      memcpy(s->pcie_config + offset, &t1, sizeof(t1));
+      qemu_epc_debug("BAR%d high write: host=0x%x", bar_index, t1);
+    } else {
+      /*
+       * Non-BAR or unsupported BAR offset: just store directly.
+       */
       memcpy(s->pcie_config + offset, buf, count);
+      qemu_epc_debug("generic BAR cfg write: off=0x%lx val=0x%x", offset, t1);
     }
   } else {
     memcpy(&t1, s->pcie_config + offset, sizeof(t1));
-    qemu_epc_debug("off 0x%lx: value 0x%x", offset, t1);
+    qemu_epc_debug("cfg BAR read: off 0x%lx: value 0x%x", offset, t1);
     memcpy(buf, s->pcie_config + offset, count);
   }
 
@@ -1079,7 +1131,8 @@ static uint64_t qepc_cfg_bar_read(void *opaque, hwaddr addr, unsigned size) {
 static void qepc_cfg_bar_write(void *opaque, hwaddr addr, uint64_t val,
                                unsigned size) {
   QEPCState *s = opaque;
-  void *ptr;
+  uint8_t *ptr8;
+  uint32_t lo;
   uint64_t tmp;
 
   qemu_epc_debug("%s: write addr=0x%lx size=%u val=0x%lx", __func__,
@@ -1092,6 +1145,11 @@ static void qepc_cfg_bar_write(void *opaque, hwaddr addr, uint64_t val,
 
   switch (addr) {
   case QEPC_BAR_CFG_OFF_MASK:
+    /*
+     * BAR enable mask programmed by the guest driver. This is an internal
+     * enable/disable view for the vfio-user side and does not directly
+     * modify the PCI config space BAR contents.
+     */
     s->bar_mask = val;
     qemu_epc_debug("%s: bar_mask updated to 0x%x", __func__, s->bar_mask);
     break;
@@ -1103,48 +1161,86 @@ static void qepc_cfg_bar_write(void *opaque, hwaddr addr, uint64_t val,
     s->bar_no = val;
     qemu_epc_debug("%s: bar_no set to %u", __func__, s->bar_no);
     break;
-  case QEPC_BAR_CFG_OFF_FLAGS:
-    if (s->bar_no >= PCI_NUM_REGIONS) {
-      qemu_epc_debug("%s: FLAGS write with invalid bar_no %u", __func__,
-                     s->bar_no);
+  case QEPC_BAR_CFG_OFF_FLAGS: {
+    /*
+     * Only modify the low 32-bit BAR dword attribute bits (memory/io,
+     * prefetchable, 32/64-bit etc). Do not touch the high dword here;
+     * the host (RC) owns the BAR contents and will program them via
+     * config space writes.
+     */
+    uint32_t attr = (uint32_t)val;
+    uint8_t bar = s->bar_no;
+
+    if (bar >= PCI_NUM_REGIONS) {
+      qemu_epc_debug("%s: FLAGS write with invalid bar_no %u", __func__, bar);
       return;
     }
-    s->bars[s->bar_no].flags = val;
-    ptr = s->pcie_config + 0x10 + 4 * s->bar_no;
-    memcpy(&tmp, ptr, sizeof(uint64_t));
-    tmp = (val & 0xf) | (tmp & 0xfffffff0) | 0x4;
-    memcpy(ptr, &tmp, sizeof(uint64_t));
-    qemu_epc_debug("%s: bar[%d] 0x%lx (flags %lx)", __func__, s->bar_no, tmp,
-                   val);
+
+    s->bars[bar].flags = attr;
+
+    ptr8 = s->pcie_config + 0x10 + 4 * bar;
+    memcpy(&lo, ptr8, sizeof(lo));
+
+    /*
+     * Update only the lowest nibble (attr bits) and preserve the
+     * address bits that may already have been programmed by the RC.
+     * For now we also force memory space (bit 0 cleared) and mark
+     * as 32-bit non-prefetchable (bit 2:1 = 00b). 64-bit semantics
+     * will be enforced by how BAR pairs are interpreted in
+     * qepc_pci_cfg_access_bar().
+     */
+    lo = (lo & ~0xF) | (attr & 0xF);
+    memcpy(ptr8, &lo, sizeof(lo));
+
+    qemu_epc_debug("%s: bar[%d] FLAGS updated lo=0x%x (flags 0x%x)", __func__,
+                   bar, lo, attr);
     break;
+  }
   case QEPC_BAR_CFG_OFF_RSV:
     break;
-  case QEPC_BAR_CFG_OFF_PHYS_ADDR:
-    if (s->bar_no >= PCI_NUM_REGIONS) {
+  case QEPC_BAR_CFG_OFF_PHYS_ADDR: {
+    /*
+     * Program the backing physical address for this BAR on the EPC side.
+     * Do not overwrite the host-visible BAR address here; the RC will
+     * program the BAR registers during enumeration and resource
+     * assignment via config space accesses.
+     */
+    uint8_t bar = s->bar_no;
+
+    if (bar >= PCI_NUM_REGIONS) {
       qemu_epc_debug("%s: PHYS_ADDR write with invalid bar_no %u", __func__,
-                     s->bar_no);
+                     bar);
       return;
     }
-    s->bars[s->bar_no].phys_addr = val;
-    ptr = s->pcie_config + 0x10 + 4 * s->bar_no;
-    memcpy(&tmp, ptr, sizeof(uint64_t));
-    tmp = (val & 0xfffffff0) | (tmp & 0xf);
-    memcpy(ptr, &tmp, sizeof(uint64_t));
-    qemu_epc_debug("%s: bar[%d] 0x%lx(addr %lx)", __func__, s->bar_no, tmp,
-                   val);
+    s->bars[bar].phys_addr = val;
+
+    /*
+     * For debugging only, read out the current low 32-bit BAR dword
+     * from the config space image without modifying it, so that we
+     * don't trample over the high dword or RC-programmed contents.
+     */
+    ptr8 = s->pcie_config + 0x10 + 4 * bar;
+    memcpy(&tmp, ptr8, sizeof(uint64_t));
+    qemu_epc_debug("%s: bar[%d] PHYS_ADDR=0x%lx (cfg_lo=0x%lx)", __func__, bar,
+                   (unsigned long)val, (unsigned long)(tmp & 0xffffffffUL));
     break;
-  case QEPC_BAR_CFG_OFF_SIZE:
-    if (s->bar_no >= PCI_NUM_REGIONS) {
-      qemu_epc_debug("%s: SIZE write with invalid bar_no %u", __func__,
-                     s->bar_no);
+  }
+  case QEPC_BAR_CFG_OFF_SIZE: {
+    uint8_t bar = s->bar_no;
+
+    if (bar >= PCI_NUM_REGIONS) {
+      qemu_epc_debug("%s: SIZE write with invalid bar_no %u", __func__, bar);
       return;
     }
     if (val == 0) {
-      qemu_epc_debug("%s: ignoring zero-sized BAR %u", __func__, s->bar_no);
+      qemu_epc_debug("%s: ignoring zero-sized BAR %u", __func__, bar);
       return;
     }
-    s->bars[s->bar_no].size = val;
+    s->bars[bar].size = val;
+    qemu_epc_debug("%s: bar[%d] SIZE=0x%lx", __func__, bar,
+                   (unsigned long)val);
     break;
+  }
   }
 }
 
