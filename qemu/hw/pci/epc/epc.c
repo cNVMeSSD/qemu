@@ -177,6 +177,14 @@ struct QEPCState {
    * through the slow-path helpers qepc_rc_dma_read/qepc_rc_dma_write.
    */
   bool ob_fast_mapped[NUM_OB_WINDOW];
+
+  /*
+   * MSI data
+   */
+  uint32_t msi_vectors; /* Number of MSI vectors */
+  uint64_t msi_addr;    /* MSI message address */
+  uint32_t msi_data;    /* MSI message data */
+  uint32_t msi_vector;  /* Currently mapped MSI vector */
 };
 
 /* QOM type name for this device. */
@@ -202,6 +210,14 @@ enum {
   QEPC_BAR_OB_WINDOWS = 3,
 };
 
+/* IRQ types supported by the EPC device */
+enum qepc_irq_type {
+  IRQ_TYPE_UNKNOWN = 0, /* Unknown interrupt, ignore */
+  IRQ_TYPE_INTX = 1,    /* Legacy INTx interrupt */
+  IRQ_TYPE_MSI = 2,     /* MSI interrupt */
+  IRQ_TYPE_MSIX = 3,    /* MSI-X interrupt */
+};
+
 /*
  * Control BAR register offsets.
  *
@@ -212,19 +228,42 @@ enum {
  *  - trigger interrupts.
  */
 enum {
-  /* Write: kick off vfio-user backend initialization. */
+  /* Write: kick off vfio-user backend initialization */
   QEPC_CTRL_OFF_START = 0x00,
-  QEPC_CTRL_OFF_WIN_START = 0x08,
-  QEPC_CTRL_OFF_WIN_SIZE = 0x10,
-  QEPC_CTRL_OFF_IRQ_TYPE = 0x18,
-  QEPC_CTRL_OFF_IRQ_NUM = 0x1c,
-  QEPC_CTRL_OFF_OB_MASK = 0x20,
-  QEPC_CTRL_OFF_OB_IDX = 0x24,
-  QEPC_CTRL_OFF_OB_PHYS = 0x28,
-  QEPC_CTRL_OFF_OB_PCI = 0x30,
-  QEPC_CTRL_OFF_OB_SIZE = 0x38,
 
-  QEPC_CTRL_SIZE = QEPC_CTRL_OFF_OB_SIZE + sizeof(uint64_t)
+  /* Endpoint outbound window configuration */
+  QEPC_CTRL_OFF_WIN_START = 0x08, /* Window start physical address (uint64_t) */
+  QEPC_CTRL_OFF_WIN_SIZE = 0x10,  /* Window size in bytes (uint64_t) */
+
+  /* Interrupt control (INTx / MSI / MSI-X) */
+  QEPC_CTRL_OFF_IRQ_TYPE = 0x18, /* Interrupt type selector (uint32_t) */
+  QEPC_CTRL_OFF_IRQ_NUM = 0x1c,  /* IRQ / vector number (uint32_t) */
+
+  /* Outbound address mapping */
+  QEPC_CTRL_OFF_OB_MASK =
+      0x20,                    /* Active outbound mappings bitmask (uint32_t) */
+  QEPC_CTRL_OFF_OB_IDX = 0x24, /* Current outbound mapping index (uint32_t) */
+  QEPC_CTRL_OFF_OB_PHYS =
+      0x28, /* Outbound mapping physical address (uint64_t) */
+  QEPC_CTRL_OFF_OB_PCI = 0x30,  /* Outbound mapping PCI address (uint64_t) */
+  QEPC_CTRL_OFF_OB_SIZE = 0x38, /* Outbound mapping size (uint64_t) */
+
+  /* MSI (single-message) support */
+  QEPC_CTRL_OFF_MSI_CTRL = 0x40, /* MSI enable + vector count (uint64_t) */
+  QEPC_CTRL_OFF_MSI_ADDR = 0x48, /* MSI message address (uint64_t) */
+  QEPC_CTRL_OFF_MSI_DATA = 0x50, /* MSI message data (uint32_t, padded) */
+
+  /* MSI-X support */
+  QEPC_CTRL_OFF_MSIX_CTRL = 0x58, /* MSI-X enable + function mask (uint64_t) */
+  QEPC_CTRL_OFF_MSIX_COUNT =
+      0x60, /* Number of MSI-X vectors supported (uint64_t) */
+  QEPC_CTRL_OFF_MSIX_TABLE =
+      0x68, /* Offset to MSI-X table MMIO region (uint64_t) */
+  QEPC_CTRL_OFF_MSIX_PBA =
+      0x70, /* Offset to MSI-X PBA MMIO region (uint64_t) */
+
+  /* End of control register space */
+  QEPC_CTRL_SIZE = QEPC_CTRL_OFF_MSIX_PBA + sizeof(uint64_t),
 };
 
 /*
@@ -234,21 +273,20 @@ enum {
  *
  * This exposes:
  *   - The base address and size of the outbound window aperture,
- *   - The current outbound window enable mask.
+ *   - The current outbound window enable mask,
+ *   - The number of MSI interrupts supported (for get_msi()).
  *
- * Unhandled offsets currently return 0 and log a debug message.
- * TODO: Define and expose additional status registers (e.g. error codes,
- *       backend state) if needed by the guest driver.
+ * Unhandled offsets return 0 and log a debug message.
  */
 static uint64_t qepc_ctrl_mmio_read(void *opaque, hwaddr addr, unsigned size) {
   QEPCState *s = opaque;
 
+  /* Log every read for debugging purposes */
   qemu_epc_debug("CTRL read: addr 0x%lx, size 0x%x", addr, size);
 
   /*
-   * All registers in this MMIO region are naturally aligned and sized
-   * accesses are expected. Don't enforce size, but it's better to only
-   * allow aligned access.
+   * All registers are naturally aligned and sized accesses are expected.
+   * Log unaligned accesses for debugging, but do not enforce strict size.
    */
   if (size != sizeof(uint32_t) && size != sizeof(uint64_t)) {
     qemu_epc_debug("%s: unaligned access size %u", __func__, size);
@@ -256,16 +294,32 @@ static uint64_t qepc_ctrl_mmio_read(void *opaque, hwaddr addr, unsigned size) {
 
   switch (addr) {
   case QEPC_CTRL_OFF_WIN_START:
+    /* Return the lower 32 bits of the outbound window base address */
     return s->ob_window_mr.addr;
   case QEPC_CTRL_OFF_WIN_START + sizeof(uint32_t):
+    /* Return the upper 32 bits of the outbound window base address */
     return s->ob_window_mr.addr >> 32;
   case QEPC_CTRL_OFF_WIN_SIZE:
+    /* Return the lower 32 bits of the outbound window size */
     return OB_WINDOW_SIZE & 0xffffffff;
   case QEPC_CTRL_OFF_WIN_SIZE + sizeof(uint32_t):
+    /* Return the upper 32 bits of the outbound window size */
     return OB_WINDOW_SIZE >> 32;
   case QEPC_CTRL_OFF_OB_MASK:
+    /* Return the bitmask of currently active outbound mappings */
     return s->ob_mask;
-  default:;
+
+  /* --- MSI support for get_msi() --- */
+  case QEPC_CTRL_OFF_MSI_CTRL:
+    /*
+     * Return the number of MSI vectors supported.
+     * The kernel driver calls pci_epc_get_msi(), which reads this register.
+     * This does not include the enable bit; only the count is returned.
+     */
+    return s->msi_vectors;
+
+  default:
+    /* For any unhandled offset, log and return 0 */
     qemu_epc_debug("unhandled read: off %ld", addr);
   }
 
@@ -769,12 +823,21 @@ static int qepc_ctrl_handle_start(QEPCState *s, uint64_t val) {
   qemu_epc_debug("%s: all BAR regions setup complete", __func__);
 
   // setup irqs
-  /* TODO: Add support for MSI/MSI-X if needed by the endpoint. */
   err = vfu_setup_device_nr_irqs(s->vfu, VFU_DEV_INTX_IRQ, 1);
   if (err < 0) {
     qemu_epc_debug("%s: failed to setup irq (err=%d errno=%d)", __func__, err,
                    errno);
     return err;
+  }
+
+  // Register MSI interrupts only if MSI has been enabled
+  if (s->msi_vectors > 0) {
+    err = vfu_setup_device_nr_irqs(s->vfu, VFU_DEV_MSI_IRQ, s->msi_vectors);
+    if (err < 0) {
+      qemu_epc_debug("%s: failed to setup MSI irqs (err=%d errno=%d)", __func__,
+                     err, errno);
+      return err;
+    }
   }
 
   // setup for dma
@@ -817,9 +880,33 @@ static int qepc_ctrl_handle_start(QEPCState *s, uint64_t val) {
  *       once such functionality is implemented in the device model.
  */
 static void qepc_handle_ctrl_irq(QEPCState *s, int irq_num) {
+  int ret;
+
   qemu_epc_debug("%s: trigger IRQ (irq_num=%d type=%u)", __func__, irq_num,
                  s->irq_type);
-  vfu_irq_trigger(s->vfu, 0);
+
+  switch (s->irq_type) {
+  case IRQ_TYPE_INTX:
+    // INTx is still only a single line, subindex 0
+    ret = vfu_irq_trigger(s->vfu, 0);
+    break;
+  case IRQ_TYPE_MSI:
+    // Trigger the requested MSI vector
+    if (irq_num >= 0 && irq_num <= s->msi_vectors) {
+      ret = vfu_irq_trigger(s->vfu, irq_num - 1);
+    } else {
+      qemu_epc_debug("%s: invalid MSI vector %d", __func__, irq_num);
+      return;
+    }
+    break;
+  default:
+    qemu_epc_debug("%s: unsupported IRQ type %u", __func__, s->irq_type);
+    return;
+  }
+
+  if (ret < 0) {
+    qemu_epc_debug("%s: vfu_irq_trigger failed (errno=%d)", __func__, errno);
+  }
 }
 
 /*
@@ -943,38 +1030,25 @@ done:
 /*
  * qepc_ctrl_mmio_write
  *
- * MMIO write handler for the EPC control BAR. It interprets writes to:
+ * MMIO write handler for the EPC control BAR.
  *
- *   QEPC_CTRL_OFF_START    - Initializes and starts the vfio-user backend.
- *   QEPC_CTRL_OFF_IRQ_TYPE - Records the interrupt type (currently unused).
- *   QEPC_CTRL_OFF_IRQ_NUM  - Triggers an interrupt via qepc_handle_ctrl_irq().
- *   QEPC_CTRL_OFF_OB_MASK  - Enables/disables outbound windows.
- *   QEPC_CTRL_OFF_OB_IDX   - Selects which outbound window is being configured.
- *   QEPC_CTRL_OFF_OB_PHYS  - Programs the system physical address for the
- *                            selected outbound window (low/high dwords).
- *   QEPC_CTRL_OFF_OB_PCI   - Programs the PCI address as seen by the client
- *                            for the selected outbound window (low/high).
- *   QEPC_CTRL_OFF_OB_SIZE  - Programs the size of the selected outbound window
- *                            (low/high).
+ * Handles writes to:
+ *   - QEPC_CTRL_OFF_START    : Initializes/starts vfio-user backend
+ *   - QEPC_CTRL_OFF_IRQ_TYPE : Records IRQ type (INTx/MSI/MSI-X)
+ *   - QEPC_CTRL_OFF_IRQ_NUM  : Triggers an interrupt
+ *   - QEPC_CTRL_OFF_OB_*     : Configures outbound windows
+ *   - QEPC_CTRL_OFF_MSI_*    : Configures MSI
  *
- * Unrecognized offsets are logged but otherwise ignored.
- *
- * TODO: Add validation of sizes, address alignment, and index bounds
- *       (ob_idx < NUM_OB_WINDOW).
+ * Unrecognized offsets are logged but ignored.
  */
 static void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
                                  unsigned size) {
   QEPCState *s = opaque;
   uint64_t tmp;
 
-  qemu_epc_debug("CTRL write: addr 0x%lx, size 0x%x, val=0x%lx", addr, size,
+  qemu_epc_debug("CTRL write: addr 0x%lx, size %u, val=0x%lx", addr, size,
                  (unsigned long)val);
 
-  /*
-   * All registers in this MMIO region are naturally aligned and sized
-   * accesses are expected. Don't enforce size, but it's better to only
-   * allow aligned access.
-   */
   if (size != sizeof(uint32_t) && size != sizeof(uint64_t)) {
     qemu_epc_debug("%s: unaligned access size %u", __func__, size);
   }
@@ -983,18 +1057,22 @@ static void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
   case QEPC_CTRL_OFF_START:
     qepc_ctrl_handle_start(s, val);
     return;
+
   case QEPC_CTRL_OFF_IRQ_TYPE:
     qemu_epc_debug("%s: IRQ_TYPE write: val=0x%lx", __func__,
                    (unsigned long)val);
     s->irq_type = val;
     break;
+
   case QEPC_CTRL_OFF_IRQ_NUM:
     qemu_epc_debug("%s: IRQ_NUM write: val=%" PRIu64, __func__, val);
     qepc_handle_ctrl_irq(s, val);
     break;
+
   case QEPC_CTRL_OFF_OB_MASK:
     qepc_handle_enable_disable_ob(s, val);
     break;
+
   case QEPC_CTRL_OFF_OB_IDX:
     if (val >= NUM_OB_WINDOW) {
       qemu_epc_debug("%s: invalid ob_idx %" PRIu64, __func__, val);
@@ -1003,74 +1081,92 @@ static void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     s->ob_idx = val;
     qemu_epc_debug("%s: ob_idx set to %u", __func__, s->ob_idx);
     break;
+
+  /* --- Outbound window physical address --- */
   case QEPC_CTRL_OFF_OB_PHYS:
-    if (s->ob_idx >= NUM_OB_WINDOW) {
-      qemu_epc_debug("%s: write to OB_PHYS with invalid ob_idx %u", __func__,
-                     s->ob_idx);
-      return;
-    }
     tmp = s->obs[s->ob_idx].phys;
     tmp = (tmp & ~0xffffffffUL) | (val & 0xffffffff);
     s->obs[s->ob_idx].phys = tmp;
     break;
   case QEPC_CTRL_OFF_OB_PHYS + sizeof(uint32_t):
-    if (s->ob_idx >= NUM_OB_WINDOW) {
-      qemu_epc_debug("%s: write to OB_PHYS[hi] with invalid ob_idx %u",
-                     __func__, s->ob_idx);
-      return;
-    }
     tmp = s->obs[s->ob_idx].phys;
     tmp = (tmp & 0xffffffff) | (val << 32);
     s->obs[s->ob_idx].phys = tmp;
     qemu_epc_debug("ob map phys: %d: 0x%lx", s->ob_idx, tmp);
     break;
+
+  /* --- Outbound window PCI address --- */
   case QEPC_CTRL_OFF_OB_PCI:
-    if (s->ob_idx >= NUM_OB_WINDOW) {
-      qemu_epc_debug("%s: write to OB_PCI with invalid ob_idx %u", __func__,
-                     s->ob_idx);
-      return;
-    }
     tmp = s->obs[s->ob_idx].pci;
-    tmp = (tmp & ~0xffffffff) | (val & 0xffffffff);
+    tmp = (tmp & ~0xffffffffUL) | (val & 0xffffffff);
     s->obs[s->ob_idx].pci = tmp;
     break;
   case QEPC_CTRL_OFF_OB_PCI + sizeof(uint32_t):
-    if (s->ob_idx >= NUM_OB_WINDOW) {
-      qemu_epc_debug("%s: write to OB_PCI[hi] with invalid ob_idx %u", __func__,
-                     s->ob_idx);
-      return;
-    }
     tmp = s->obs[s->ob_idx].pci;
     tmp = (tmp & 0xffffffff) | (val << 32);
     s->obs[s->ob_idx].pci = tmp;
     qemu_epc_debug("ob map pci: %d: 0x%lx", s->ob_idx, tmp);
     break;
+
+  /* --- Outbound window size --- */
   case QEPC_CTRL_OFF_OB_SIZE:
-    if (s->ob_idx >= NUM_OB_WINDOW) {
-      qemu_epc_debug("%s: write to OB_SIZE with invalid ob_idx %u", __func__,
-                     s->ob_idx);
-      return;
-    }
     tmp = s->obs[s->ob_idx].size;
-    tmp = (tmp & ~0xffffffff) | (val & 0xffffffff);
+    tmp = (tmp & ~0xffffffffUL) | (val & 0xffffffff);
     s->obs[s->ob_idx].size = tmp;
     break;
   case QEPC_CTRL_OFF_OB_SIZE + sizeof(uint32_t):
-    if (s->ob_idx >= NUM_OB_WINDOW) {
-      qemu_epc_debug("%s: write to OB_SIZE[hi] with invalid ob_idx %u",
-                     __func__, s->ob_idx);
-      return;
-    }
     tmp = s->obs[s->ob_idx].size;
     tmp = (tmp & 0xffffffff) | (val << 32);
     s->obs[s->ob_idx].size = tmp;
     qemu_epc_debug("ob map size: %d: 0x%lx", s->ob_idx, tmp);
     break;
+
+  /* --- MSI support --- */
+  case QEPC_CTRL_OFF_MSI_CTRL:
+    tmp = s->msi_vectors;
+    tmp = (tmp & ~0xffffffffUL) | (val & 0xffffffff);
+    s->msi_vectors = tmp;
+    qemu_epc_debug("MSI_CTRL write: enable=%b vectors=%u", s->msi_vectors > 0,
+                   s->msi_vectors);
+    break;
+  case QEPC_CTRL_OFF_MSI_CTRL + sizeof(uint32_t):
+    tmp = s->msi_vectors;
+    tmp = (tmp & 0xffffffff) | (val << 32);
+    s->msi_vectors = tmp;
+    qemu_epc_debug("MSI_CTRL high write: enable=%b vectors=%u",
+                   s->msi_vectors > 0, s->msi_vectors);
+    break;
+
+  case QEPC_CTRL_OFF_MSI_ADDR:
+    tmp = s->msi_addr;
+    tmp = (tmp & ~0xffffffffUL) | (val & 0xffffffff);
+    s->msi_addr = tmp;
+    qemu_epc_debug("MSI_ADDR write: 0x%lx", s->msi_addr);
+    break;
+  case QEPC_CTRL_OFF_MSI_ADDR + sizeof(uint32_t):
+    tmp = s->msi_addr;
+    tmp = (tmp & 0xffffffff) | (val << 32);
+    s->msi_addr = tmp;
+    qemu_epc_debug("MSI_ADDR high write: 0x%lx", s->msi_addr);
+    break;
+
+  case QEPC_CTRL_OFF_MSI_DATA:
+    s->msi_data = val & 0xffffffff;
+    qemu_epc_debug("MSI_DATA write: 0x%x", s->msi_data);
+    break;
+
+  /* Placeholder for map_msi_irq; could use an offset past MSI_ADDR/DATA */
+  case QEPC_CTRL_OFF_MSI_ADDR + 0x100:
+    s->msi_vector = val;
+    qemu_epc_debug("MSI mapped: phys=0x%lx vector=%u", s->msi_addr,
+                   s->msi_vector);
+    break;
+
   default:
     qemu_epc_debug("CTRL write: invalid address 0x%lx", addr);
+    break;
   }
 }
-
 static const MemoryRegionOps qepc_ctrl_mmio_ops = {
     .read = qepc_ctrl_mmio_read,
     .write = qepc_ctrl_mmio_write,
@@ -1237,8 +1333,7 @@ static void qepc_cfg_bar_write(void *opaque, hwaddr addr, uint64_t val,
       return;
     }
     s->bars[bar].size = val;
-    qemu_epc_debug("%s: bar[%d] SIZE=0x%lx", __func__, bar,
-                   (unsigned long)val);
+    qemu_epc_debug("%s: bar[%d] SIZE=0x%lx", __func__, bar, (unsigned long)val);
     break;
   }
   }
@@ -1296,6 +1391,7 @@ static void qepc_realize(PCIDevice *pci_dev, Error **errp) {
     error_setg(errp, "qemu-epc: failed to allocate PCI config space");
     return;
   }
+  memset(s->pcie_config, 0, PCIE_CONFIG_SPACE_SIZE);
 
   qemu_epc_debug(
       "initializing PCI config space memory region: size=0x%lx ptr=%p",
