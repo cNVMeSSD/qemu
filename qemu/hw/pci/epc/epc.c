@@ -138,8 +138,6 @@ struct QEPCState {
    *  - pci:  PCI address as seen by the vfio-user client,
    *  - size: size of the window in bytes.
    */
-  /* TODO: Remove the stale commented-out register definitions above once the
-   *       enum-based layout is stable and documented externally. */
   struct {
     uint64_t phys;
     uint64_t pci;
@@ -600,8 +598,7 @@ static ssize_t qepc_bar_access(vfu_ctx_t *vfu_ctx, uint8_t barno,
                                const bool is_write) {
 
   QEPCState *s = vfu_get_private(vfu_ctx);
-  dma_addr_t addr;
-
+  dma_addr_t phys_addr;
   qemu_epc_debug("%s: bar=%u offset=0x%lx size=0x%zx %s", __func__, barno,
                  (unsigned long)offset, count, is_write ? "write" : "read");
 
@@ -628,15 +625,15 @@ static ssize_t qepc_bar_access(vfu_ctx_t *vfu_ctx, uint8_t barno,
     return -1;
   }
 
-  addr = s->bars[barno].phys_addr + offset;
-  qemu_epc_debug("%s: resolved DMA addr=0x%lx", __func__, (unsigned long)addr);
+  phys_addr = s->bars[barno].phys_addr + offset;
+  qemu_epc_debug("%s: resolved DMA addr=0x%lx", __func__,
+                 (unsigned long)phys_addr);
 
   if (is_write) {
-    pci_dma_write(&s->dev, addr, buf, count);
+    pci_dma_write(&s->dev, phys_addr, buf, count);
   } else {
-    pci_dma_read(&s->dev, addr, buf, count);
+    pci_dma_read(&s->dev, phys_addr, buf, count);
   }
-
   return count;
 }
 
@@ -737,8 +734,63 @@ static void qepc_dma_unregister(vfu_ctx_t *vfu_ctx, vfu_dma_info_t *info) {
                  (uint64_t)info->iova.iov_base + info->iova.iov_len,
                  (uint64_t)info->iova.iov_len, info->vaddr);
 
-  /* TODO: remove from rc_mrs[] and log which slot was reclaimed. */
-  (void)s;
+  /*
+   * Match the unregistered region against rc_mrs[] and reclaim the slot.
+   * Also unmap any OB fast-path local MemoryRegion that referenced this rc_mr.
+   */
+  for (int i = 0; i < s->rc_mr_idx; i++) {
+    if (s->rc_mrs[i].rc_phys == (uint64_t)info->iova.iov_base &&
+        s->rc_mrs[i].size == info->iova.iov_len &&
+        s->rc_mrs[i].vaddr == info->vaddr) {
+
+      qemu_epc_debug(
+          "%s: found matching rc_mrs[%d], rc_phys=0x%lx size=0x%lx vaddr=%p",
+          __func__, i, (unsigned long)s->rc_mrs[i].rc_phys,
+          (unsigned long)s->rc_mrs[i].size, s->rc_mrs[i].vaddr);
+
+      /* Unmap any OB windows that were mapped using this rc_mr. */
+      for (int w = 0; w < NUM_OB_WINDOW; w++) {
+        if (!s->ob_fast_mapped[w]) {
+          continue;
+        }
+
+        uint64_t pci = s->obs[w].pci;
+        uint64_t sz = s->obs[w].size;
+
+        if (pci >= s->rc_mrs[i].rc_phys &&
+            (pci + sz) <= (s->rc_mrs[i].rc_phys + s->rc_mrs[i].size)) {
+          qemu_epc_debug("%s: removing fast mapping for ob window %d "
+                         "(pci=0x%lx size=0x%lx)",
+                         __func__, w, (unsigned long)pci, (unsigned long)sz);
+
+          /* Remove the per-window subregion from the OB aperture */
+          memory_region_del_subregion(&s->ob_window_mr, &s->rc_local_mr[w]);
+
+          s->ob_fast_mapped[w] = false;
+          s->ob_mask &= ~(1 << w);
+        }
+      }
+
+      /* Remove the rc_mr entry by shifting subsequent entries down. */
+      for (int k = i; k + 1 < s->rc_mr_idx; k++) {
+        s->rc_mrs[k] = s->rc_mrs[k + 1];
+      }
+
+      /* Clear the now-unused last slot */
+      s->rc_mr_idx--;
+      if (s->rc_mr_idx >= 0) {
+        s->rc_mrs[s->rc_mr_idx].rc_phys = 0;
+        s->rc_mrs[s->rc_mr_idx].size = 0;
+        s->rc_mrs[s->rc_mr_idx].vaddr = NULL;
+      }
+
+      qemu_epc_debug("%s: rc_mrs compacted, new rc_mr_idx=%d", __func__,
+                     s->rc_mr_idx);
+      return;
+    }
+  }
+
+  qemu_epc_debug("%s: no matching rc_mr found for unregister", __func__);
 }
 
 /* qepc_ctrl_handle_start
@@ -951,10 +1003,22 @@ static void qepc_handle_enable_disable_ob(QEPCState *s, uint64_t val) {
     }
 
     if (prev & bit) {
-      /* TODO: Implement outbound window disable/unmap path. */
-      qemu_epc_debug("%s: disabling ob window %d is not supported yet",
-                     __func__, i);
-      /* For now, just clear the bit in the software mask. */
+      /*
+       * Disable path: if the window was previously fast-mapped, remove the
+       * local subregion to keep internal state consistent and free the slot.
+       */
+      qemu_epc_debug("%s: disabling ob window %d", __func__, i);
+
+      /* Remove fast-path mapping if present */
+      if (s->ob_fast_mapped[i]) {
+        qemu_epc_debug("%s: unmapping fast local MR for ob window %d", __func__,
+                       i);
+        /* Remove subregion from the OB aperture if present */
+        memory_region_del_subregion(&s->ob_window_mr, &s->rc_local_mr[i]);
+        s->ob_fast_mapped[i] = false;
+      }
+
+      /* Clear the bit in the software mask */
       s->ob_mask &= ~bit;
       qemu_epc_debug("%s: ob window %d disabled, ob_mask=0x%x", __func__, i,
                      s->ob_mask);
@@ -989,33 +1053,80 @@ static void qepc_handle_enable_disable_ob(QEPCState *s, uint64_t val) {
         void *start = (uint8_t *)s->rc_mrs[j].vaddr + off;
         uint64_t size = s->obs[i].size;
 
-        // sprintf(s->rc_local_mr_name, "qemu-epc/rc-local-%d", 0);
-        /* TODO: Use i as index instead of 0 once per-window mappings are
-         * supported. */
         qemu_epc_debug("%s: mapping ob window %d using rc_mrs[%d]: "
                        "rc_phys=0x%lx off=0x%lx size=0x%lx start=%p",
                        __func__, i, j, (unsigned long)s->rc_mrs[j].rc_phys,
                        (unsigned long)off, (unsigned long)size, start);
 
-        memory_region_init_ram_ptr(&s->rc_local_mr[0], OBJECT(s),
-                                   "qemu-epc/rc-local-0", size, start);
-
+        /* Ensure IOMMU address space is available before attempting to map.
+         * We map inside the OB aperture MR itself (relative offset) rather
+         * than inserting a mapping under the IOMMU root with an absolute
+         * physical address.
+         */
         AddressSpace *as = pci_device_iommu_address_space(&s->dev);
-
-        memory_region_add_subregion(as->root, s->ob_window_mr.addr,
-                                    &s->rc_local_mr[0]);
+        if (!as) {
+          qemu_epc_debug(
+              "%s: no IOMMU address space available, cannot map ob window %d",
+              __func__, i);
+          goto done_check_next;
+        }
 
         /*
-         * Mark this window as enabled in the software mask.
-         * Note: hardware-visible behavior is still controlled by
-         * the guest via the QEPC_CTRL_OFF_OB_MASK register.
+         * Compute the per-window relative offset inside the OB aperture and
+         * validate bounds against the total OB aperture to avoid overlapping
+         * or out-of-range subregion additions which will trigger assertions.
          */
+        hwaddr window_offset = (hwaddr)i * (hwaddr)OB_WINDOW_SIZE;
+        uint64_t ob_aperture_size =
+            (uint64_t)NUM_OB_WINDOW * (uint64_t)OB_WINDOW_SIZE;
+
+        if ((uint64_t)window_offset + size > ob_aperture_size) {
+          qemu_epc_debug("%s: calculated window_offset (0x%lx) + size (0x%lx) "
+                         "out of OB aperture bounds (aperture=0x%lx), skip",
+                         __func__, (unsigned long)window_offset,
+                         (unsigned long)size, (unsigned long)ob_aperture_size);
+          goto done_check_next;
+        }
+
+        /* If there's an existing fast mapping for this window, remove it so
+         * we can re-map with the new parameters. This avoids skipping remap
+         * when obs[] changed between enable operations.
+         */
+        if (s->ob_fast_mapped[i]) {
+          qemu_epc_debug("%s: ob window %d already fast-mapped; removing old "
+                         "mapping to remap",
+                         __func__, i);
+          memory_region_del_subregion(&s->ob_window_mr, &s->rc_local_mr[i]);
+          s->ob_fast_mapped[i] = false;
+        }
+
+        /* Initialize a per-window local memory region and map it at the
+         * correct relative offset within the OB aperture MR.
+         */
+        char mr_name[64];
+        snprintf(mr_name, sizeof(mr_name), "qemu-epc/rc-local-%d", i);
+
+        memory_region_init_ram_ptr(&s->rc_local_mr[i], OBJECT(s), mr_name, size,
+                                   start);
+
+        /* Add as a subregion of the OB aperture at the computed offset. */
+        memory_region_add_subregion(&s->ob_window_mr, window_offset,
+                                    &s->rc_local_mr[i]);
+
+        /*
+         * Mark this window as enabled in the software mask and mark the fast
+         * mapping as present so subsequent enables won't re-map the same
+         * region unless obs[] changes (we remove and remap above).
+         */
+        s->ob_fast_mapped[i] = true;
         s->ob_mask |= bit;
-        qemu_epc_debug(
-            "%s: ob window %d enabled and mapped at ob_window_base=0x%lx",
-            __func__, i, (unsigned long)s->ob_window_mr.addr);
+        qemu_epc_debug("%s: ob window %d enabled and mapped at "
+                       "ob_window_base=0x%lx (window_offset=0x%lx)",
+                       __func__, i, (unsigned long)s->ob_window_mr.addr,
+                       (unsigned long)window_offset);
         goto done;
       }
+    done_check_next:;
     }
 
     qemu_epc_debug(
@@ -1424,11 +1535,45 @@ static void qepc_realize(PCIDevice *pci_dev, Error **errp) {
                    &s->ob_window_mr);
 
   /*
-   * TODO: Implement a corresponding .exit callback that:
+   * Implement a corresponding .exit callback that:
    *   - Tears down the vfio-user context if it was created,
-   *   - Unregisters any rc_local_mr subregions from the IOMMU address space,
+   *   - Unregisters any rc_local_mr subregions from the OB aperture,
    *   - Closes s->vfu_fd and frees any dynamically allocated resources.
    */
+}
+static void qepc_exit(PCIDevice *pci_dev) {
+  QEPCState *s = QEMU_EPC(pci_dev);
+
+  qemu_epc_debug("%s: exit called", __func__);
+
+  /* Remove any per-window fast mappings */
+  for (int i = 0; i < NUM_OB_WINDOW; i++) {
+    if (s->ob_fast_mapped[i]) {
+      qemu_epc_debug("%s: removing rc_local_mr[%d] subregion", __func__, i);
+      memory_region_del_subregion(&s->ob_window_mr, &s->rc_local_mr[i]);
+      s->ob_fast_mapped[i] = false;
+    }
+  }
+
+  /* Destroy vfu context if present */
+  if (s->vfu) {
+    qemu_epc_debug("%s: destroying vfu ctx", __func__);
+    vfu_destroy_ctx(s->vfu);
+    s->vfu = NULL;
+  }
+
+  /* Clear fd handler if one was installed */
+  if (s->vfu_fd >= 0) {
+    qemu_epc_debug("%s: clearing vfu fd handler (fd=%d)", __func__, s->vfu_fd);
+    qemu_set_fd_handler(s->vfu_fd, NULL, NULL, NULL);
+    s->vfu_fd = -1;
+  }
+
+  /* Free duplicated socket path if present */
+  if (s->sock_path) {
+    g_free((void *)s->sock_path);
+    s->sock_path = NULL;
+  }
 }
 
 /*
@@ -1470,7 +1615,7 @@ static void qepc_class_init(ObjectClass *klass, const void *data) {
   object_class_property_add_str(klass, "sock-path", NULL, qepc_object_set_path);
 
   k->realize = qepc_realize;
-  // k->exit = qepc_exit;
+  k->exit = qepc_exit;
   k->vendor_id = PCI_VENDOR_ID_REDHAT;
   k->device_id = PCI_DEVICE_ID_REDHAT_QEMU_EPC;
   k->revision = QEPC_REVISION;
