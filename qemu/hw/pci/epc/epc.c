@@ -61,16 +61,21 @@
   } while (0)
 #endif
 
-/* Number of outbound windows the controller exposes. */
-#define NUM_OB_WINDOW 5
+/*
+ * Number of outbound windows the controller exposes.
+ * Window 0 is reserved for MSI/MSI-X interrupts.
+ * Windows 1..(NUM_OB_WINDOW-1) are available for data transfer.
+ */
+#define NUM_OB_WINDOW 6
 /* Size of each outbound window (guest-visible aperture size). */
 #define OB_WINDOW_SIZE 0x40000000ULL
 
 /*
  * Maximum number of registered root complex (RC) memory regions.
  * These correspond to DMA regions registered by the vfio-user client.
+ * Should be >= NUM_OB_WINDOW (currently 6: 1 for MSI, 5 for data).
  */
-#define SUPPORT_RC_NUM_MRS 5
+#define SUPPORT_RC_NUM_MRS 6
 
 /*
  * QEPCState
@@ -175,14 +180,6 @@ struct QEPCState {
    * through the slow-path helpers qepc_rc_dma_read/qepc_rc_dma_write.
    */
   bool ob_fast_mapped[NUM_OB_WINDOW];
-
-  /*
-   * MSI data
-   */
-  uint32_t msi_vectors; /* Number of MSI vectors */
-  uint64_t msi_addr;    /* MSI message address */
-  uint32_t msi_data;    /* MSI message data */
-  uint32_t msi_vector;  /* Currently mapped MSI vector */
 };
 
 /* QOM type name for this device. */
@@ -239,29 +236,18 @@ enum {
 
   /* Outbound address mapping */
   QEPC_CTRL_OFF_OB_MASK =
-      0x20,                    /* Active outbound mappings bitmask (uint32_t) */
+      0x20,                    /* RO: Outbound mappings bitmask (uint32_t) */
   QEPC_CTRL_OFF_OB_IDX = 0x24, /* Current outbound mapping index (uint32_t) */
   QEPC_CTRL_OFF_OB_PHYS =
       0x28, /* Outbound mapping physical address (uint64_t) */
   QEPC_CTRL_OFF_OB_PCI = 0x30,  /* Outbound mapping PCI address (uint64_t) */
   QEPC_CTRL_OFF_OB_SIZE = 0x38, /* Outbound mapping size (uint64_t) */
 
-  /* MSI (single-message) support */
-  QEPC_CTRL_OFF_MSI_CTRL = 0x40, /* MSI enable + vector count (uint64_t) */
-  QEPC_CTRL_OFF_MSI_ADDR = 0x48, /* MSI message address (uint64_t) */
-  QEPC_CTRL_OFF_MSI_DATA = 0x50, /* MSI message data (uint32_t, padded) */
-
-  /* MSI-X support */
-  QEPC_CTRL_OFF_MSIX_CTRL = 0x58, /* MSI-X enable + function mask (uint64_t) */
-  QEPC_CTRL_OFF_MSIX_COUNT =
-      0x60, /* Number of MSI-X vectors supported (uint64_t) */
-  QEPC_CTRL_OFF_MSIX_TABLE =
-      0x68, /* Offset to MSI-X table MMIO region (uint64_t) */
-  QEPC_CTRL_OFF_MSIX_PBA =
-      0x70, /* Offset to MSI-X PBA MMIO region (uint64_t) */
+  /* New command-based OB window registers */
+  QEPC_CTRL_OFF_OB_ENABLE = 0x40,       /* WO: Write 1 to enable s->ob_idx, 0 to disable */
 
   /* End of control register space */
-  QEPC_CTRL_SIZE = QEPC_CTRL_OFF_MSIX_PBA + sizeof(uint64_t),
+  QEPC_CTRL_SIZE = QEPC_CTRL_OFF_OB_ENABLE + sizeof(uint32_t),
 };
 
 /*
@@ -306,16 +292,6 @@ static uint64_t qepc_ctrl_mmio_read(void *opaque, hwaddr addr, unsigned size) {
   case QEPC_CTRL_OFF_OB_MASK:
     /* Return the bitmask of currently active outbound mappings */
     return s->ob_mask;
-
-  /* --- MSI support for get_msi() --- */
-  case QEPC_CTRL_OFF_MSI_CTRL:
-    /*
-     * Return the number of MSI vectors supported.
-     * The kernel driver calls pci_epc_get_msi(), which reads this register.
-     * This does not include the enable bit; only the count is returned.
-     */
-    return s->msi_vectors;
-
   default:
     /* For any unhandled offset, log and return 0 */
     qemu_epc_debug("unhandled read: off %ld", addr);
@@ -631,8 +607,20 @@ static ssize_t qepc_bar_access(vfu_ctx_t *vfu_ctx, uint8_t barno,
 
   if (is_write) {
     pci_dma_write(&s->dev, phys_addr, buf, count);
+    // Log first few bytes of written data
+    int log_len = count < 16 ? count : 16;
+    char hexbuf[64] = {0};
+    for (int i = 0; i < log_len; ++i)
+      snprintf(hexbuf + i * 3, sizeof(hexbuf) - i * 3, "%02x ", (unsigned char)buf[i]);
+    qemu_epc_debug("%s: DMA WRITE addr=0x%lx size=%zu data=%s", __func__, (unsigned long)phys_addr, count, hexbuf);
   } else {
     pci_dma_read(&s->dev, phys_addr, buf, count);
+    // Log first few bytes of read data
+    int log_len = count < 16 ? count : 16;
+    char hexbuf[64] = {0};
+    for (int i = 0; i < log_len; ++i)
+      snprintf(hexbuf + i * 3, sizeof(hexbuf) - i * 3, "%02x ", (unsigned char)buf[i]);
+    qemu_epc_debug("%s: DMA READ addr=0x%lx size=%zu data=%s", __func__, (unsigned long)phys_addr, count, hexbuf);
   }
   return count;
 }
@@ -882,14 +870,20 @@ static int qepc_ctrl_handle_start(QEPCState *s, uint64_t val) {
     return err;
   }
 
-  // Register MSI interrupts only if MSI has been enabled
-  if (s->msi_vectors > 0) {
-    err = vfu_setup_device_nr_irqs(s->vfu, VFU_DEV_MSI_IRQ, s->msi_vectors);
-    if (err < 0) {
-      qemu_epc_debug("%s: failed to setup MSI irqs (err=%d errno=%d)", __func__,
-                     err, errno);
-      return err;
-    }
+  // setup msi irqs
+  err = vfu_setup_device_nr_irqs(s->vfu, VFU_DEV_MSI_IRQ, 32);
+  if (err < 0) {
+    qemu_epc_debug("%s: failed to setup msi (err=%d errno=%d)", __func__, err,
+                   errno);
+    return err;
+  }
+
+  // setup msi-x irqs
+  err = vfu_setup_device_nr_irqs(s->vfu, VFU_DEV_MSIX_IRQ, 2048);
+  if (err < 0) {
+    qemu_epc_debug("%s: failed to setup msi (err=%d errno=%d)", __func__, err,
+                   errno);
+    return err;
   }
 
   // setup for dma
@@ -943,13 +937,7 @@ static void qepc_handle_ctrl_irq(QEPCState *s, int irq_num) {
     ret = vfu_irq_trigger(s->vfu, 0);
     break;
   case IRQ_TYPE_MSI:
-    // Trigger the requested MSI vector
-    if (irq_num >= 0 && irq_num <= s->msi_vectors) {
-      ret = vfu_irq_trigger(s->vfu, irq_num - 1);
-    } else {
-      qemu_epc_debug("%s: invalid MSI vector %d", __func__, irq_num);
-      return;
-    }
+    ret = vfu_irq_trigger(s->vfu, irq_num - 1);
     break;
   default:
     qemu_epc_debug("%s: unsupported IRQ type %u", __func__, s->irq_type);
@@ -962,180 +950,57 @@ static void qepc_handle_ctrl_irq(QEPCState *s, int irq_num) {
 }
 
 /*
- * qepc_handle_enable_disale_ob
+ * qepc_handle_single_window_setup
  *
- * Handles writes to the outbound window enable/disable mask register.
- * Compares the new mask with the previous one and, for each window whose
- * state changed, attempts to map the corresponding RC DMA region into
- * the EPC outbound aperture.
- *
- * The current implementation:
- *   - Only supports enabling outbound windows; disabling logs a message
- *     but does not tear down mappings.
- *   - Uses rc_local_mr[0] for all windows, effectively allowing only one
- *     active local mapping at a time.
- *
- * TODO:
- *   - Implement proper disable logic to remove subregions and free
- *     associated resources.
- *   - Use a distinct rc_local_mr[] entry per outbound window instead of
- *     always using index 0.
- *   - Add bounds checking on ob_idx and validate obs[] entries.
+ * Handles enable/disable commands for a single outbound window (by index).
+ * This replaces the mask-based handler with a command-based interface.
  */
-static void qepc_handle_enable_disable_ob(QEPCState *s, uint64_t val) {
-  uint8_t prev = s->ob_mask;
+static void qepc_handle_single_window_setup(QEPCState *s, uint32_t idx, bool enable) {
+    if (idx >= NUM_OB_WINDOW) return;
 
-  /*
-   * Only a limited number of outbound windows are supported. The guest
-   * should never set bits outside NUM_OB_WINDOW, but if it does, we
-   * ignore them and only act on the supported subset.
-   */
-  uint8_t new_mask = val & ((1U << NUM_OB_WINDOW) - 1);
-
-  qemu_epc_debug("%s: change ob_mask: prev=0x%x new=0x%x", __func__, prev,
-                 new_mask);
-
-  for (int i = 0; i < NUM_OB_WINDOW; i++) {
-    uint8_t bit = (1 << i);
-
-    if ((prev & bit) == (new_mask & bit)) {
-      continue;
+    /* Handle DISABLE Command */
+    if (!enable) {
+        if (s->ob_fast_mapped[idx]) {
+            qemu_epc_debug("Unmapping OB window %d", idx);
+            memory_region_del_subregion(&s->ob_window_mr, &s->rc_local_mr[idx]);
+            object_unparent(OBJECT(&s->rc_local_mr[idx]));
+            s->ob_fast_mapped[idx] = false;
+            s->ob_mask &= ~(1U << idx);
+        }
+        return;
     }
 
-    if (prev & bit) {
-      /*
-       * Disable path: if the window was previously fast-mapped, remove the
-       * local subregion to keep internal state consistent and free the slot.
-       */
-      qemu_epc_debug("%s: disabling ob window %d", __func__, i);
-
-      /* Remove fast-path mapping if present */
-      if (s->ob_fast_mapped[i]) {
-        qemu_epc_debug("%s: unmapping fast local MR for ob window %d", __func__,
-                       i);
-        /* Remove subregion from the OB aperture if present */
-        memory_region_del_subregion(&s->ob_window_mr, &s->rc_local_mr[i]);
-        s->ob_fast_mapped[i] = false;
-      }
-
-      /* Clear the bit in the software mask */
-      s->ob_mask &= ~bit;
-      qemu_epc_debug("%s: ob window %d disabled, ob_mask=0x%x", __func__, i,
-                     s->ob_mask);
-      continue;
-    } else {
-      qemu_epc_debug(
-          "%s: enabling ob window %d (phys=0x%lx pci=0x%lx size=0x%lx)",
-          __func__, i, (unsigned long)s->obs[i].phys,
-          (unsigned long)s->obs[i].pci, (unsigned long)s->obs[i].size);
-    }
-
-    /*
-     * Sanity-check the programmed outbound window before trying to map it.
-     */
-    if (s->obs[i].size == 0) {
-      qemu_epc_debug("%s: skip enabling ob window %d, size is 0", __func__, i);
-      continue;
-    }
+    /* Handle ENABLE Command */
+    if (s->obs[idx].size == 0) return;
 
     for (int j = 0; j < SUPPORT_RC_NUM_MRS; j++) {
+        if (s->rc_mrs[j].size == 0 || s->rc_mrs[j].vaddr == NULL) continue;
 
-      if (s->rc_mrs[j].size == 0 || s->rc_mrs[j].vaddr == NULL) {
-        continue;
-      }
+        /* Verify mapping fits in Host Memory Region */
+        if (s->rc_mrs[j].rc_phys <= s->obs[idx].pci &&
+            (s->obs[idx].pci + s->obs[idx].size) <= (s->rc_mrs[j].rc_phys + s->rc_mrs[j].size)) {
 
-      if (s->rc_mrs[j].rc_phys <= s->obs[i].pci &&
-          (s->obs[i].pci + s->obs[i].size) <=
-              s->rc_mrs[j].rc_phys + s->rc_mrs[j].size) {
+            uint64_t off = s->obs[idx].pci - s->rc_mrs[j].rc_phys;
+            void *host_vaddr = (uint8_t *)s->rc_mrs[j].vaddr + off;
+            hwaddr window_offset = (hwaddr)idx * (hwaddr)OB_WINDOW_SIZE;
 
-        uint64_t off = s->obs[i].pci - s->rc_mrs[j].rc_phys;
+            /* Cleanup existing mapping if re-configuring */
+            if (s->ob_fast_mapped[idx]) {
+                memory_region_del_subregion(&s->ob_window_mr, &s->rc_local_mr[idx]);
+                object_unparent(OBJECT(&s->rc_local_mr[idx]));
+            }
 
-        void *start = (uint8_t *)s->rc_mrs[j].vaddr + off;
-        uint64_t size = s->obs[i].size;
+            char mr_name[32];
+            snprintf(mr_name, sizeof(mr_name), "epc-ob-%d", idx);
+            memory_region_init_ram_ptr(&s->rc_local_mr[idx], OBJECT(s), mr_name,
+                                       s->obs[idx].size, host_vaddr);
+            memory_region_add_subregion(&s->ob_window_mr, window_offset, &s->rc_local_mr[idx]);
 
-        qemu_epc_debug("%s: mapping ob window %d using rc_mrs[%d]: "
-                       "rc_phys=0x%lx off=0x%lx size=0x%lx start=%p",
-                       __func__, i, j, (unsigned long)s->rc_mrs[j].rc_phys,
-                       (unsigned long)off, (unsigned long)size, start);
-
-        /* Ensure IOMMU address space is available before attempting to map.
-         * We map inside the OB aperture MR itself (relative offset) rather
-         * than inserting a mapping under the IOMMU root with an absolute
-         * physical address.
-         */
-        AddressSpace *as = pci_device_iommu_address_space(&s->dev);
-        if (!as) {
-          qemu_epc_debug(
-              "%s: no IOMMU address space available, cannot map ob window %d",
-              __func__, i);
-          goto done_check_next;
+            s->ob_fast_mapped[idx] = true;
+            s->ob_mask |= (1U << idx);
+            return;
         }
-
-        /*
-         * Compute the per-window relative offset inside the OB aperture and
-         * validate bounds against the total OB aperture to avoid overlapping
-         * or out-of-range subregion additions which will trigger assertions.
-         */
-        hwaddr window_offset = (hwaddr)i * (hwaddr)OB_WINDOW_SIZE;
-        uint64_t ob_aperture_size =
-            (uint64_t)NUM_OB_WINDOW * (uint64_t)OB_WINDOW_SIZE;
-
-        if ((uint64_t)window_offset + size > ob_aperture_size) {
-          qemu_epc_debug("%s: calculated window_offset (0x%lx) + size (0x%lx) "
-                         "out of OB aperture bounds (aperture=0x%lx), skip",
-                         __func__, (unsigned long)window_offset,
-                         (unsigned long)size, (unsigned long)ob_aperture_size);
-          goto done_check_next;
-        }
-
-        /* If there's an existing fast mapping for this window, remove it so
-         * we can re-map with the new parameters. This avoids skipping remap
-         * when obs[] changed between enable operations.
-         */
-        if (s->ob_fast_mapped[i]) {
-          qemu_epc_debug("%s: ob window %d already fast-mapped; removing old "
-                         "mapping to remap",
-                         __func__, i);
-          memory_region_del_subregion(&s->ob_window_mr, &s->rc_local_mr[i]);
-          s->ob_fast_mapped[i] = false;
-        }
-
-        /* Initialize a per-window local memory region and map it at the
-         * correct relative offset within the OB aperture MR.
-         */
-        char mr_name[64];
-        snprintf(mr_name, sizeof(mr_name), "qemu-epc/rc-local-%d", i);
-
-        memory_region_init_ram_ptr(&s->rc_local_mr[i], OBJECT(s), mr_name, size,
-                                   start);
-
-        /* Add as a subregion of the OB aperture at the computed offset. */
-        memory_region_add_subregion(&s->ob_window_mr, window_offset,
-                                    &s->rc_local_mr[i]);
-
-        /*
-         * Mark this window as enabled in the software mask and mark the fast
-         * mapping as present so subsequent enables won't re-map the same
-         * region unless obs[] changes (we remove and remap above).
-         */
-        s->ob_fast_mapped[i] = true;
-        s->ob_mask |= bit;
-        qemu_epc_debug("%s: ob window %d enabled and mapped at "
-                       "ob_window_base=0x%lx (window_offset=0x%lx)",
-                       __func__, i, (unsigned long)s->ob_window_mr.addr,
-                       (unsigned long)window_offset);
-        goto done;
-      }
-    done_check_next:;
     }
-
-    qemu_epc_debug(
-        "%s: no matching RC MR for ob window %d (pci=0x%lx size=0x%lx)",
-        __func__, i, (unsigned long)s->obs[i].pci,
-        (unsigned long)s->obs[i].size);
-  }
-done:
-  qemu_epc_debug("%s: final ob_mask=0x%x", __func__, s->ob_mask);
 }
 
 /*
@@ -1148,7 +1013,6 @@ done:
  *   - QEPC_CTRL_OFF_IRQ_TYPE : Records IRQ type (INTx/MSI/MSI-X)
  *   - QEPC_CTRL_OFF_IRQ_NUM  : Triggers an interrupt
  *   - QEPC_CTRL_OFF_OB_*     : Configures outbound windows
- *   - QEPC_CTRL_OFF_MSI_*    : Configures MSI
  *
  * Unrecognized offsets are logged but ignored.
  */
@@ -1180,8 +1044,8 @@ static void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     qepc_handle_ctrl_irq(s, val);
     break;
 
-  case QEPC_CTRL_OFF_OB_MASK:
-    qepc_handle_enable_disable_ob(s, val);
+  case QEPC_CTRL_OFF_OB_ENABLE:
+    qepc_handle_single_window_setup(s, s->ob_idx, val > 0);
     break;
 
   case QEPC_CTRL_OFF_OB_IDX:
@@ -1230,47 +1094,6 @@ static void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     tmp = (tmp & 0xffffffff) | (val << 32);
     s->obs[s->ob_idx].size = tmp;
     qemu_epc_debug("ob map size: %d: 0x%lx", s->ob_idx, tmp);
-    break;
-
-  /* --- MSI support --- */
-  case QEPC_CTRL_OFF_MSI_CTRL:
-    tmp = s->msi_vectors;
-    tmp = (tmp & ~0xffffffffUL) | (val & 0xffffffff);
-    s->msi_vectors = tmp;
-    qemu_epc_debug("MSI_CTRL write: enable=%b vectors=%u", s->msi_vectors > 0,
-                   s->msi_vectors);
-    break;
-  case QEPC_CTRL_OFF_MSI_CTRL + sizeof(uint32_t):
-    tmp = s->msi_vectors;
-    tmp = (tmp & 0xffffffff) | (val << 32);
-    s->msi_vectors = tmp;
-    qemu_epc_debug("MSI_CTRL high write: enable=%b vectors=%u",
-                   s->msi_vectors > 0, s->msi_vectors);
-    break;
-
-  case QEPC_CTRL_OFF_MSI_ADDR:
-    tmp = s->msi_addr;
-    tmp = (tmp & ~0xffffffffUL) | (val & 0xffffffff);
-    s->msi_addr = tmp;
-    qemu_epc_debug("MSI_ADDR write: 0x%lx", s->msi_addr);
-    break;
-  case QEPC_CTRL_OFF_MSI_ADDR + sizeof(uint32_t):
-    tmp = s->msi_addr;
-    tmp = (tmp & 0xffffffff) | (val << 32);
-    s->msi_addr = tmp;
-    qemu_epc_debug("MSI_ADDR high write: 0x%lx", s->msi_addr);
-    break;
-
-  case QEPC_CTRL_OFF_MSI_DATA:
-    s->msi_data = val & 0xffffffff;
-    qemu_epc_debug("MSI_DATA write: 0x%x", s->msi_data);
-    break;
-
-  /* Placeholder for map_msi_irq; could use an offset past MSI_ADDR/DATA */
-  case QEPC_CTRL_OFF_MSI_ADDR + 0x100:
-    s->msi_vector = val;
-    qemu_epc_debug("MSI mapped: phys=0x%lx vector=%u", s->msi_addr,
-                   s->msi_vector);
     break;
 
   default:
@@ -1458,6 +1281,84 @@ static const MemoryRegionOps qemu_epc_mmio_bar_cfg_ops = {
 };
 
 /*
+ * Generic helper to add a PCI capability to config space.
+ * - cap_id: PCI capability ID
+ * - cap_offset: offset in config space (>= 0x40)
+ * - cap_len: length of capability structure
+ * - cap_data: pointer to capability data (cap_len bytes, may be NULL for
+ * zeroed)
+ */
+static void qepc_add_pci_capability(QEPCState *s, uint8_t cap_id,
+                                    uint8_t cap_offset, uint8_t cap_len,
+                                    const uint8_t *cap_data) {
+  uint8_t *cfg = s->pcie_config;
+
+  // Set Capabilities List bit in Status register
+  uint16_t status = *(uint16_t *)(cfg + PCI_STATUS);
+  status |= PCI_STATUS_CAP_LIST;
+  *(uint16_t *)(cfg + PCI_STATUS) = status;
+
+  // Find the end of the capability list
+  uint8_t first = cfg[PCI_CAPABILITY_LIST];
+  if (first < 0x40 || first == 0) {
+    // No capabilities yet, set this as the first
+    cfg[PCI_CAPABILITY_LIST] = cap_offset;
+  } else {
+    // Walk to the end of the list
+    uint8_t last = first;
+    while (1) {
+      uint8_t next = cfg[last + 1];
+      if (next < 0x40 || next == 0)
+        break;
+      last = next;
+    }
+    // Link new capability at the end
+    cfg[last + 1] = cap_offset;
+  }
+
+  // Fill in capability header
+  cfg[cap_offset] = cap_id;
+  cfg[cap_offset + 1] = 0; // Next pointer (end of list)
+
+  // Fill in capability data (if provided)
+  if (cap_data && cap_len > 2) {
+    memcpy(cfg + cap_offset + 2, cap_data + 2, cap_len - 2);
+  } else if (cap_len > 2) {
+    memset(cfg + cap_offset + 2, 0, cap_len - 2);
+  }
+}
+
+/*
+ * Helper to add MSI capability to PCI config space using generic adder.
+ */
+static void qepc_add_msi_capability(QEPCState *s) {
+  const uint8_t msi_offset = 0x40;  // First capability offset
+  const uint8_t msi_cap_len = 0x10; // 64-bit MSI capability size
+  uint8_t msi_cap[16];
+
+  memset(msi_cap, 0, sizeof(msi_cap));
+  msi_cap[0] = PCI_CAP_ID_MSI;
+  msi_cap[1] = 0; // Next pointer
+
+  // Message Control: enable 64-bit, support 32 vectors
+  uint16_t msg_ctrl = (5 << 1) | (1 << 7); // MMC=5 (32 vectors), 64-bit capable
+  msi_cap[2] = msg_ctrl & 0xff;
+  msi_cap[3] = (msg_ctrl >> 8) & 0xff;
+
+  // MSI Address (64-bit)
+  // msi_cap[4..7] = 0x0; // Address Low
+  // msi_cap[8..11] = 0x0; // Address High
+
+  // MSI Data
+  // msi_cap[12..13] = 0x0;
+
+  // Reserved
+  // msi_cap[14..15] = 0x0;
+
+  qepc_add_pci_capability(s, PCI_CAP_ID_MSI, msi_offset, msi_cap_len, msi_cap);
+}
+
+/*
  * qepc_realize
  *
  * PCIDeviceClass::realize callback. This is invoked when the EPC device
@@ -1503,6 +1404,9 @@ static void qepc_realize(PCIDevice *pci_dev, Error **errp) {
     return;
   }
   memset(s->pcie_config, 0, PCIE_CONFIG_SPACE_SIZE);
+
+  // Add MSI capability to PCI config space
+  qepc_add_msi_capability(s);
 
   qemu_epc_debug(
       "initializing PCI config space memory region: size=0x%lx ptr=%p",
