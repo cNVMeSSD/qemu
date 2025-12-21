@@ -66,7 +66,7 @@
  * Window 0 is reserved for MSI/MSI-X interrupts.
  * Windows 1..(NUM_OB_WINDOW-1) are available for data transfer.
  */
-#define NUM_OB_WINDOW 6
+#define NUM_OB_WINDOW 32
 /* Size of each outbound window (guest-visible aperture size). */
 #define OB_WINDOW_SIZE 0x40000000ULL
 
@@ -75,7 +75,7 @@
  * These correspond to DMA regions registered by the vfio-user client.
  * Should be >= NUM_OB_WINDOW (currently 6: 1 for MSI, 5 for data).
  */
-#define SUPPORT_RC_NUM_MRS 6
+#define SUPPORT_RC_NUM_MRS 32
 
 /*
  * QEPCState
@@ -235,16 +235,16 @@ enum {
   QEPC_CTRL_OFF_IRQ_NUM = 0x1c,  /* IRQ / vector number (uint32_t) */
 
   /* Outbound address mapping */
-  QEPC_CTRL_OFF_OB_MASK =
-      0x20,                    /* RO: Outbound mappings bitmask (uint32_t) */
-  QEPC_CTRL_OFF_OB_IDX = 0x24, /* Current outbound mapping index (uint32_t) */
+  QEPC_CTRL_OFF_OB_MASK = 0x20, /* RO: Outbound mappings bitmask (uint32_t) */
+  QEPC_CTRL_OFF_OB_IDX = 0x24,  /* Current outbound mapping index (uint32_t) */
   QEPC_CTRL_OFF_OB_PHYS =
       0x28, /* Outbound mapping physical address (uint64_t) */
   QEPC_CTRL_OFF_OB_PCI = 0x30,  /* Outbound mapping PCI address (uint64_t) */
   QEPC_CTRL_OFF_OB_SIZE = 0x38, /* Outbound mapping size (uint64_t) */
 
   /* New command-based OB window registers */
-  QEPC_CTRL_OFF_OB_ENABLE = 0x40,       /* WO: Write 1 to enable s->ob_idx, 0 to disable */
+  QEPC_CTRL_OFF_OB_ENABLE =
+      0x40, /* WO: Write 1 to enable s->ob_idx, 0 to disable */
 
   /* End of control register space */
   QEPC_CTRL_SIZE = QEPC_CTRL_OFF_OB_ENABLE + sizeof(uint32_t),
@@ -611,16 +611,20 @@ static ssize_t qepc_bar_access(vfu_ctx_t *vfu_ctx, uint8_t barno,
     int log_len = count < 16 ? count : 16;
     char hexbuf[64] = {0};
     for (int i = 0; i < log_len; ++i)
-      snprintf(hexbuf + i * 3, sizeof(hexbuf) - i * 3, "%02x ", (unsigned char)buf[i]);
-    qemu_epc_debug("%s: DMA WRITE addr=0x%lx size=%zu data=%s", __func__, (unsigned long)phys_addr, count, hexbuf);
+      snprintf(hexbuf + i * 3, sizeof(hexbuf) - i * 3, "%02x ",
+               (unsigned char)buf[i]);
+    qemu_epc_debug("%s: DMA WRITE addr=0x%lx size=%zu data=%s", __func__,
+                   (unsigned long)phys_addr, count, hexbuf);
   } else {
     pci_dma_read(&s->dev, phys_addr, buf, count);
     // Log first few bytes of read data
     int log_len = count < 16 ? count : 16;
     char hexbuf[64] = {0};
     for (int i = 0; i < log_len; ++i)
-      snprintf(hexbuf + i * 3, sizeof(hexbuf) - i * 3, "%02x ", (unsigned char)buf[i]);
-    qemu_epc_debug("%s: DMA READ addr=0x%lx size=%zu data=%s", __func__, (unsigned long)phys_addr, count, hexbuf);
+      snprintf(hexbuf + i * 3, sizeof(hexbuf) - i * 3, "%02x ",
+               (unsigned char)buf[i]);
+    qemu_epc_debug("%s: DMA READ addr=0x%lx size=%zu data=%s", __func__,
+                   (unsigned long)phys_addr, count, hexbuf);
   }
   return count;
 }
@@ -955,52 +959,101 @@ static void qepc_handle_ctrl_irq(QEPCState *s, int irq_num) {
  * Handles enable/disable commands for a single outbound window (by index).
  * This replaces the mask-based handler with a command-based interface.
  */
-static void qepc_handle_single_window_setup(QEPCState *s, uint32_t idx, bool enable) {
-    if (idx >= NUM_OB_WINDOW) return;
+static void qepc_handle_single_window_setup(QEPCState *s, uint32_t idx,
+                                            bool enable) {
+  if (idx >= NUM_OB_WINDOW) {
+    qemu_epc_debug("%s: Invalid OB index %u", __func__, idx);
+    return;
+  }
 
-    /* Handle DISABLE Command */
-    if (!enable) {
-        if (s->ob_fast_mapped[idx]) {
-            qemu_epc_debug("Unmapping OB window %d", idx);
-            memory_region_del_subregion(&s->ob_window_mr, &s->rc_local_mr[idx]);
-            object_unparent(OBJECT(&s->rc_local_mr[idx]));
-            s->ob_fast_mapped[idx] = false;
-            s->ob_mask &= ~(1U << idx);
+  /* Handle DISABLE Command */
+  if (!enable) {
+    if (s->ob_fast_mapped[idx]) {
+      qemu_epc_debug("Unmapping OB window %d", idx);
+      memory_region_del_subregion(&s->ob_window_mr, &s->rc_local_mr[idx]);
+      object_unparent(OBJECT(&s->rc_local_mr[idx]));
+      s->ob_fast_mapped[idx] = false;
+    }
+    s->ob_mask &= ~(1U << idx);
+    return;
+  }
+
+  /* Handle ENABLE Command */
+  if (s->obs[idx].size == 0) {
+    qemu_epc_debug("%s: Window %d enable failed: size is 0", __func__, idx);
+    return;
+  }
+
+  /* * PCIe hardware windows and QEMU RAM pointers require page alignment.
+   * We round up to 4KB to ensure QEMU can map the pointer successfully.
+   */
+  uint64_t map_size = (s->obs[idx].size < 4096) ? 4096 : s->obs[idx].size;
+
+  for (int j = 0; j < SUPPORT_RC_NUM_MRS; j++) {
+    if (s->rc_mrs[j].size == 0 || s->rc_mrs[j].vaddr == NULL)
+      continue;
+
+    /* Verify mapping fits in Host Memory Region */
+    if (s->obs[idx].pci >= s->rc_mrs[j].rc_phys &&
+        (s->obs[idx].pci + s->obs[idx].size) <=
+            (s->rc_mrs[j].rc_phys + s->rc_mrs[j].size)) {
+
+      uint64_t host_off = s->obs[idx].pci - s->rc_mrs[j].rc_phys;
+      void *host_vaddr = (uint8_t *)s->rc_mrs[j].vaddr + host_off;
+
+      /* * Logic for window_offset:
+       * If the BAR is a flat aperture where windows are at fixed offsets:
+       * window_offset = (hwaddr)idx * (64 * 1024); // Assuming 64KB windows
+       *
+       * If the guest provides the 'phys' address:
+       * We find which BAR matches 'phys' and find the offset within it.
+       */
+      hwaddr window_offset = 0;
+      bool found_bar = false;
+      for (int b = 0; b < 6; b++) {
+        if (s->bar_mask & (1 << b)) {
+          if (s->obs[idx].phys >= s->bars[b].phys_addr &&
+              s->obs[idx].phys < (s->bars[b].phys_addr + s->bars[b].size)) {
+            window_offset = s->obs[idx].phys - s->bars[b].phys_addr;
+            found_bar = true;
+            break;
+          }
         }
+      }
+
+      if (!found_bar) {
+        qemu_epc_debug("%s: phys 0x%" PRIx64
+                       " does not fall into any BAR aperture",
+                       __func__, s->obs[idx].phys);
         return;
+      }
+
+      /* Cleanup existing mapping */
+      if (s->ob_fast_mapped[idx]) {
+        memory_region_del_subregion(&s->ob_window_mr, &s->rc_local_mr[idx]);
+        object_unparent(OBJECT(&s->rc_local_mr[idx]));
+      }
+
+      char mr_name[32];
+      snprintf(mr_name, sizeof(mr_name), "epc-ob-%d", idx);
+
+      memory_region_init_ram_ptr(&s->rc_local_mr[idx], OBJECT(s), mr_name,
+                                 map_size, host_vaddr);
+      memory_region_add_subregion(&s->ob_window_mr, window_offset,
+                                  &s->rc_local_mr[idx]);
+
+      s->ob_fast_mapped[idx] = true;
+      s->ob_mask |= (1U << idx);
+
+      qemu_epc_debug("Enabled window %d: Offset 0x%" PRIx64
+                     " -> PCI 0x%" PRIx64,
+                     idx, window_offset, s->obs[idx].pci);
+      return;
     }
+  }
 
-    /* Handle ENABLE Command */
-    if (s->obs[idx].size == 0) return;
-
-    for (int j = 0; j < SUPPORT_RC_NUM_MRS; j++) {
-        if (s->rc_mrs[j].size == 0 || s->rc_mrs[j].vaddr == NULL) continue;
-
-        /* Verify mapping fits in Host Memory Region */
-        if (s->rc_mrs[j].rc_phys <= s->obs[idx].pci &&
-            (s->obs[idx].pci + s->obs[idx].size) <= (s->rc_mrs[j].rc_phys + s->rc_mrs[j].size)) {
-
-            uint64_t off = s->obs[idx].pci - s->rc_mrs[j].rc_phys;
-            void *host_vaddr = (uint8_t *)s->rc_mrs[j].vaddr + off;
-            hwaddr window_offset = (hwaddr)idx * (hwaddr)OB_WINDOW_SIZE;
-
-            /* Cleanup existing mapping if re-configuring */
-            if (s->ob_fast_mapped[idx]) {
-                memory_region_del_subregion(&s->ob_window_mr, &s->rc_local_mr[idx]);
-                object_unparent(OBJECT(&s->rc_local_mr[idx]));
-            }
-
-            char mr_name[32];
-            snprintf(mr_name, sizeof(mr_name), "epc-ob-%d", idx);
-            memory_region_init_ram_ptr(&s->rc_local_mr[idx], OBJECT(s), mr_name,
-                                       s->obs[idx].size, host_vaddr);
-            memory_region_add_subregion(&s->ob_window_mr, window_offset, &s->rc_local_mr[idx]);
-
-            s->ob_fast_mapped[idx] = true;
-            s->ob_mask |= (1U << idx);
-            return;
-        }
-    }
+  qemu_epc_debug("%s: No Host RC region for PCI 0x%" PRIx64, __func__,
+                 s->obs[idx].pci);
 }
 
 /*
@@ -1044,8 +1097,35 @@ static void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     qepc_handle_ctrl_irq(s, val);
     break;
 
-  case QEPC_CTRL_OFF_OB_ENABLE:
-    qepc_handle_single_window_setup(s, s->ob_idx, val > 0);
+  case QEPC_CTRL_OFF_OB_ENABLE: {
+    uint8_t before_mask = s->ob_mask;
+    bool before_enabled = (before_mask & (1U << s->ob_idx)) != 0;
+    fprintf(stderr,
+            "qemu_epc: OB_ENABLE_WRITE: idx=%u, val=%u, ob_mask=0x%02x, "
+            "enabled_before=%d\n",
+            s->ob_idx, (unsigned)val, before_mask, before_enabled);
+
+    if (val) {
+      fprintf(
+          stderr,
+          "qemu_epc: Enabling window %u: Phys=0x%lx, PCI=0x%lx, Size=0x%lx\n",
+          s->ob_idx, (unsigned long)s->obs[s->ob_idx].phys,
+          (unsigned long)s->obs[s->ob_idx].pci,
+          (unsigned long)s->obs[s->ob_idx].size);
+    } else {
+      fprintf(stderr, "qemu_epc: Disabling window %u\n", s->ob_idx);
+    }
+
+    qepc_handle_single_window_setup(s, s->ob_idx, val != 0);
+
+    uint8_t after_mask = s->ob_mask;
+    bool after_enabled = (after_mask & (1U << s->ob_idx)) != 0;
+    fprintf(stderr,
+            "qemu_epc: OB_ENABLE_WRITE: idx=%u, ob_mask after=0x%02x, "
+            "enabled_after=%d\n",
+            s->ob_idx, after_mask, after_enabled);
+  } break;
+    break;
     break;
 
   case QEPC_CTRL_OFF_OB_IDX:
