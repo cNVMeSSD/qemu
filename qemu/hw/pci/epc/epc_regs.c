@@ -40,8 +40,6 @@
  * this file. Declaring them here avoids reordering the functions and keeps the
  * read handler immediately before the write handler for readability.
  * ------------------------------------------------------------------------- */
-void qepc_handle_ctrl_irq(QEPCState *s, int irq_num);
-void qepc_handle_single_window_setup(QEPCState *s, uint32_t idx, bool enable);
 
 /* ---------------------------------------------------------------------------
  * Control BAR — read handler
