@@ -93,6 +93,12 @@ uint64_t qepc_ctrl_mmio_read(void *opaque, hwaddr addr, unsigned size) {
   case QEPC_CTRL_OFF_OB_MASK:
     /* Return the bitmask of currently active outbound mappings */
     return s->ob_mask;
+  case QEPC_CTRL_OFF_MSI_CFG:
+    /* Return the number of MSI vectors configured by the guest driver */
+    return s->msi_num;
+  case QEPC_CTRL_OFF_MSIX_NUM:
+    /* Return the number of MSI-X vectors configured by the guest driver */
+    return s->msix_num;
   default:
     /* For any unhandled offset, log and return 0 */
     qemu_epc_debug("unhandled read: off %ld", addr);

@@ -705,6 +705,54 @@ int qepc_ctrl_handle_start(QEPCState *s, uint64_t val)
         return -1;
     }
 
+    /*
+     * Copy the PCI header fields that the EP driver has already written into
+     * pcie_config (via BAR 1 / cfg_base) into libvfio-user's own config space
+     * mirror.
+     *
+     * Background: write_header() and the BAR configuration sequence in the
+     * Linux qemu-epc driver write vendor/device ID, class codes, etc. directly
+     * into s->pcie_config[] through the pci_cfg_mr RAM-backed MemoryRegion.
+     * Those writes never pass through qepc_pci_cfg_access(), so libvfio-user's
+     * mirror (vfu_pci_get_config_space()) is never updated with the basic
+     * header fields.
+     *
+     * The RC (client QEMU vfio-user-pci) reads config space through
+     * qepc_pci_cfg_access(), which serves reads from the vfu mirror.  Without
+     * this copy the vendor ID at offset 0x00 reads back as 0x0000, which
+     * Linux PCI enumeration treats as "slot empty" and the device never
+     * appears in the guest's dmesg.
+     *
+     * We only copy the standard Type-0 header (64 bytes, offsets 0x00–0x3f).
+     * Capability structures are managed by vfu_pci_add_capability() below and
+     * must not be overwritten here.  BAR registers (0x10–0x27) are handled
+     * by qepc_pci_cfg_access_bar() and are also left to the RC to assign.
+     */
+    {
+        vfu_pci_config_space_t *vfu_cfg = vfu_pci_get_config_space(s->vfu);
+        if (vfu_cfg) {
+            /*
+             * Copy only the non-BAR, non-capability-list header fields:
+             *   0x00–0x0f : vendor/device ID, command, status, revision,
+             *               class code, cache line, latency, header type, BIST
+             *   0x28–0x3f : cardbus CIS, subsystem IDs, ROM BAR, cap pointer,
+             *               interrupt line/pin, min_gnt/max_lat
+             * Skip 0x10–0x27 (BARs) — the RC probes and assigns those itself.
+             */
+            memcpy((uint8_t *)vfu_cfg + 0x00, s->pcie_config + 0x00, 0x10);
+            memcpy((uint8_t *)vfu_cfg + 0x28, s->pcie_config + 0x28, 0x18);
+            qemu_epc_debug("%s: copied pcie_config header into vfu mirror "
+                           "vendor=0x%04x device=0x%04x class=0x%04x",
+                           __func__,
+                           *(uint16_t *)(s->pcie_config + 0x00),
+                           *(uint16_t *)(s->pcie_config + 0x02),
+                           *(uint16_t *)(s->pcie_config + 0x0a));
+        } else {
+            qemu_epc_debug("%s: vfu_pci_get_config_space returned NULL, "
+                           "header fields will not be visible to RC", __func__);
+        }
+    }
+
     qemu_epc_debug("%s: setting up PCI config space region", __func__);
     err = vfu_setup_region(s->vfu, VFU_PCI_DEV_CFG_REGION_IDX,
                            PCIE_CONFIG_SPACE_SIZE, &qepc_pci_cfg_access,
