@@ -199,6 +199,22 @@ struct QEPCState {
   uint32_t doorbell_offset;
 
   /*
+   * Software DMA engine state.
+   *
+   * The kernel driver stages a transfer by writing dma_src, dma_dst, and
+   * dma_len, then writing 1 to DMA_START.  qepc_handle_dma_start() copies
+   * dma_len bytes from the guest PA dma_src to the guest PA dma_dst using
+   * pci_dma_read / pci_dma_write.  dma_src may be an outbound-window address
+   * (backed by RC memory via memory_region_init_ram_ptr) while dma_dst is
+   * typically a guest-RAM address.  On completion dma_status is set to 1
+   * (done) or 0xffffffff (error); the kernel polls this register.
+   */
+  uint64_t dma_src;     /* source guest PA          */
+  uint64_t dma_dst;     /* destination guest PA     */
+  uint32_t dma_len;     /* transfer byte count      */
+  uint32_t dma_status;  /* 0=idle 1=done -1U=error  */
+
+  /*
    * Outbound window definitions:
    *  - phys: system physical address backing this outbound window,
    *  - pci:  PCI address as seen by the vfio-user client,
@@ -360,8 +376,23 @@ enum {
   QEPC_CTRL_OFF_DB_BAR = 0x64,
   QEPC_CTRL_OFF_DB_OFF = 0x68,
 
+  /* --- Software DMA engine registers (matching epc_driver.c) --- */
+  /*
+   * Five registers implement a simple DMA MEMCPY engine.
+   * The kernel driver writes SRC/DST/LEN, then writes 1 to START.
+   * QEMU performs the copy synchronously and sets STATUS before returning.
+   *
+   * SRC / DST are 64-bit values written as two consecutive 32-bit writes
+   * (low word at the base offset, high word at base+4).
+   */
+  QEPC_CTRL_OFF_DMA_SRC    = 0x6c, /* uint64_t source guest PA      (WO) */
+  QEPC_CTRL_OFF_DMA_DST    = 0x74, /* uint64_t destination guest PA (WO) */
+  QEPC_CTRL_OFF_DMA_LEN    = 0x7c, /* uint32_t byte count           (WO) */
+  QEPC_CTRL_OFF_DMA_STATUS = 0x80, /* uint32_t 0=idle 1=done -1=err (RO) */
+  QEPC_CTRL_OFF_DMA_START  = 0x84, /* uint32_t write 1 to start     (WO) */
+
   /* End of control register space */
-  QEPC_CTRL_SIZE = QEPC_CTRL_OFF_DB_OFF + sizeof(uint32_t),
+  QEPC_CTRL_SIZE = 0x88,
 };
 
 /* =========================================================================
@@ -476,6 +507,17 @@ void qepc_handle_ctrl_irq(QEPCState *s, int irq_num);
  * QEPC_CTRL_OFF_OB_ENABLE is written.
  */
 void qepc_handle_single_window_setup(QEPCState *s, uint32_t idx, bool enable);
+
+/**
+ * qepc_handle_dma_start - Execute a software DMA transfer.
+ * @s: pointer to QEPCState
+ *
+ * Called when the guest writes 1 to QEPC_CTRL_OFF_DMA_START.
+ * Copies s->dma_len bytes from guest PA s->dma_src to guest PA s->dma_dst
+ * using pci_dma_read / pci_dma_write.  Sets s->dma_status to 1 on success
+ * or (uint32_t)-1 on error.
+ */
+void qepc_handle_dma_start(QEPCState *s);
 
 /* -------------------------------------------------------------------------
  * From epc_vfu.c

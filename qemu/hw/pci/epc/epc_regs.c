@@ -108,6 +108,23 @@ uint64_t qepc_ctrl_mmio_read(void *opaque, hwaddr addr, unsigned size) {
   case QEPC_CTRL_OFF_MSIX_NUM:
     /* Return the number of MSI-X vectors configured by the guest driver */
     return s->msix_num;
+
+  case QEPC_CTRL_OFF_DMA_STATUS:
+    return s->dma_status;
+
+  case QEPC_CTRL_OFF_DMA_SRC:
+    return (uint32_t)s->dma_src;
+  case QEPC_CTRL_OFF_DMA_SRC + sizeof(uint32_t):
+    return s->dma_src >> 32;
+
+  case QEPC_CTRL_OFF_DMA_DST:
+    return (uint32_t)s->dma_dst;
+  case QEPC_CTRL_OFF_DMA_DST + sizeof(uint32_t):
+    return s->dma_dst >> 32;
+
+  case QEPC_CTRL_OFF_DMA_LEN:
+    return s->dma_len;
+
   default:
     /* For any unhandled offset, log and return 0 */
     qemu_epc_debug("unhandled read: off %ld", addr);
@@ -338,6 +355,74 @@ void qepc_handle_single_window_setup(QEPCState *s, uint32_t idx, bool enable) {
 
   qemu_epc_debug("%s: No Host RC region for PCI 0x%" PRIx64, __func__,
                  s->obs[idx].pci);
+}
+
+/* ---------------------------------------------------------------------------
+ * Software DMA engine helper
+ * ------------------------------------------------------------------------- */
+
+/*
+ * qepc_handle_dma_start
+ *
+ * Executes a DMA MEMCPY transfer requested by the guest driver:
+ *
+ *   s->dma_src  — source guest PA (may be an outbound-window slot, which
+ *                 pci_dma_read dispatches through ob_window_mr and therefore
+ *                 reads from the RC's vaddr-backed RAM subregion)
+ *   s->dma_dst  — destination guest PA (normally guest RAM)
+ *   s->dma_len  — byte count
+ *
+ * Uses pci_dma_read / pci_dma_write so that the EPC device's DMA address
+ * space (= system address space without IOMMU) resolves both addresses
+ * correctly.  The transfer is synchronous; dma_status is set before return.
+ *
+ * Called from qepc_ctrl_mmio_write with the BQL held — no additional
+ * locking is needed.
+ */
+void qepc_handle_dma_start(QEPCState *s)
+{
+    void *buf;
+    MemTxResult ret;
+
+    if (s->dma_len == 0) {
+        s->dma_status = 1; /* zero-length transfer always succeeds */
+        return;
+    }
+
+    buf = g_malloc(s->dma_len);
+    if (!buf) {
+        qemu_epc_debug("%s: g_malloc(%u) failed", __func__, s->dma_len);
+        s->dma_status = (uint32_t)-1;
+        return;
+    }
+
+    /* Read from source (OB window or guest RAM) */
+    ret = pci_dma_read(&s->dev, (dma_addr_t)s->dma_src, buf,
+                       (dma_addr_t)s->dma_len);
+    if (ret != MEMTX_OK) {
+        qemu_epc_debug("%s: pci_dma_read failed (ret=%u) src=0x%lx len=%u",
+                       __func__, ret, (unsigned long)s->dma_src, s->dma_len);
+        g_free(buf);
+        s->dma_status = (uint32_t)-1;
+        return;
+    }
+
+    /* Write to destination (guest RAM) */
+    ret = pci_dma_write(&s->dev, (dma_addr_t)s->dma_dst, buf,
+                        (dma_addr_t)s->dma_len);
+    if (ret != MEMTX_OK) {
+        qemu_epc_debug("%s: pci_dma_write failed (ret=%u) dst=0x%lx len=%u",
+                       __func__, ret, (unsigned long)s->dma_dst, s->dma_len);
+        g_free(buf);
+        s->dma_status = (uint32_t)-1;
+        return;
+    }
+
+    g_free(buf);
+    s->dma_status = 1; /* success */
+    qemu_epc_debug("%s: DMA complete: src=0x%lx dst=0x%lx len=%u",
+                   __func__, (unsigned long)s->dma_src,
+                   (unsigned long)s->dma_dst, s->dma_len);
 }
 
 /* ---------------------------------------------------------------------------
@@ -606,6 +691,50 @@ void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     s->doorbell_offset = (uint32_t)val;
     qemu_epc_debug("%s: doorbell offset set to 0x%x", __func__,
                    s->doorbell_offset);
+    break;
+
+  /* -----------------------------------------------------------------------
+   * Software DMA engine registers.
+   *
+   * The guest programs SRC, DST, LEN (each as one or two 32-bit writes),
+   * then writes 1 to START.  The handler executes the copy synchronously
+   * and writes the result into dma_status before returning, so the guest's
+   * polling loop sees the completion immediately.
+   * ----------------------------------------------------------------------- */
+
+  case QEPC_CTRL_OFF_DMA_SRC:
+    s->dma_src = (s->dma_src & ~(uint64_t)0xffffffff) | (uint32_t)val;
+    break;
+  case QEPC_CTRL_OFF_DMA_SRC + sizeof(uint32_t):
+    s->dma_src = (s->dma_src & 0xffffffff) | (val << 32);
+    break;
+
+  case QEPC_CTRL_OFF_DMA_DST:
+    s->dma_dst = (s->dma_dst & ~(uint64_t)0xffffffff) | (uint32_t)val;
+    break;
+  case QEPC_CTRL_OFF_DMA_DST + sizeof(uint32_t):
+    s->dma_dst = (s->dma_dst & 0xffffffff) | (val << 32);
+    break;
+
+  case QEPC_CTRL_OFF_DMA_LEN:
+    s->dma_len = (uint32_t)val;
+    qemu_epc_debug("%s: DMA_LEN=0x%x", __func__, s->dma_len);
+    break;
+
+  case QEPC_CTRL_OFF_DMA_STATUS:
+    /* Read-only from guest perspective; writes are ignored. */
+    qemu_epc_debug("%s: guest attempted write to DMA_STATUS (ignored)",
+                   __func__);
+    break;
+
+  case QEPC_CTRL_OFF_DMA_START:
+    if (val) {
+      qemu_epc_debug("%s: DMA_START: src=0x%lx dst=0x%lx len=0x%x",
+                     __func__, (unsigned long)s->dma_src,
+                     (unsigned long)s->dma_dst, s->dma_len);
+      s->dma_status = 0; /* mark busy / clear previous result */
+      qepc_handle_dma_start(s);
+    }
     break;
 
   default:
