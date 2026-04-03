@@ -39,8 +39,6 @@
 #include "hw/remote/vfio-user-obj.h"
 
 #include "libvfio-user.h"
-#include "pci_caps/msix.h"
-#include "pci_caps/msi.h"
 
 /* =========================================================================
  * Debug logging
@@ -51,7 +49,9 @@
 #ifdef DEBUG_QEMU_EPC
 #define qemu_epc_debug(fmt, ...) qemu_log("qemu_epc: " fmt "\n", ##__VA_ARGS__)
 #else
-#define qemu_epc_debug(...) do { } while (0)
+#define qemu_epc_debug(...)                                                    \
+  do {                                                                         \
+  } while (0)
 #endif
 
 /* =========================================================================
@@ -160,10 +160,10 @@ struct QEPCState {
    *
    * All fields are zero until the guest writes QEPC_CTRL_OFF_MSIX_CFG.
    */
-  uint8_t  msix_table_bar;
+  uint8_t msix_table_bar;
   uint32_t msix_table_off;
   uint32_t msix_table_size;
-  uint8_t  msix_pba_bar;
+  uint8_t msix_pba_bar;
   uint32_t msix_pba_off;
   uint32_t msix_pba_size;
   uint16_t msix_num;
@@ -195,7 +195,7 @@ struct QEPCState {
    * qepc_handle_ctrl_irq() — INTx, MSI, or MSI-X depending on irq_type —
    * using the value written as the vector/subindex selector.
    */
-  uint8_t  doorbell_bar;
+  uint8_t doorbell_bar;
   uint32_t doorbell_offset;
 
   /*
@@ -273,9 +273,9 @@ enum {
 /* IRQ types supported by the EPC device */
 enum qepc_irq_type {
   IRQ_TYPE_UNKNOWN = 0, /* Unknown interrupt, ignore */
-  IRQ_TYPE_INTX = 1,    /* Legacy INTx interrupt */
-  IRQ_TYPE_MSI = 2,     /* MSI interrupt */
-  IRQ_TYPE_MSIX = 3,    /* MSI-X interrupt */
+  IRQ_TYPE_INTX    = (1 << 0),    /* Legacy INTx interrupt */
+  IRQ_TYPE_MSI     = (1 << 1),     /* MSI interrupt */
+  IRQ_TYPE_MSIX    = (1 << 2),    /* MSI-X interrupt */
 };
 
 /* =========================================================================
@@ -326,12 +326,13 @@ enum {
    *                              below and register the capability.
    * QEPC_CTRL_OFF_MSIX_NUM:     number of vectors (uint16_t, max 2048).
    * QEPC_CTRL_OFF_MSIX_TBL_BAR: BAR index holding the MSI-X table (uint8_t).
-   * QEPC_CTRL_OFF_MSIX_TBL_OFF: byte offset of the table in that BAR (uint32_t).
-   * QEPC_CTRL_OFF_MSIX_PBA_BAR: BAR index holding the PBA (uint8_t).
-   * QEPC_CTRL_OFF_MSIX_PBA_OFF: byte offset of the PBA in that BAR (uint32_t).
+   * QEPC_CTRL_OFF_MSIX_TBL_OFF: byte offset of the table in that BAR
+   * (uint32_t). QEPC_CTRL_OFF_MSIX_PBA_BAR: BAR index holding the PBA
+   * (uint8_t). QEPC_CTRL_OFF_MSIX_PBA_OFF: byte offset of the PBA in that BAR
+   * (uint32_t).
    */
-  QEPC_CTRL_OFF_MSIX_CFG     = 0x48,
-  QEPC_CTRL_OFF_MSIX_NUM     = 0x4c,
+  QEPC_CTRL_OFF_MSIX_CFG = 0x48,
+  QEPC_CTRL_OFF_MSIX_NUM = 0x4c,
   QEPC_CTRL_OFF_MSIX_TBL_BAR = 0x50,
   QEPC_CTRL_OFF_MSIX_TBL_OFF = 0x54,
   QEPC_CTRL_OFF_MSIX_PBA_BAR = 0x58,
