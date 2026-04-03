@@ -937,6 +937,72 @@ int qepc_ctrl_handle_start(QEPCState *s, uint64_t val)
         return -1;
     }
 
+    /*
+     * Step 10a: Sync capability layout from libvfio-user's config space mirror
+     * back into s->pcie_config so the Linux EP driver can find MSI/MSI-X
+     * capabilities by reading from BAR 1 (cfg_base).
+     *
+     * Background:
+     *   vfu_pci_add_capability() writes MSI and MSI-X capability structures
+     *   into libvfio-user's own internal config space mirror and links them
+     *   into the capability list.  As a side-effect it also sets the
+     *   PCI_STATUS_CAP_LIST bit in the Status register of that mirror.
+     *   However, the EP-side config space shadow (s->pcie_config) — which is
+     *   exposed to the Linux driver as a plain RAM-backed MemoryRegion on
+     *   BAR 1 — is never updated by vfu_pci_add_capability().
+     *
+     *   qemu_ep_find_capability() in the Linux driver reads PCI_STATUS and
+     *   PCI_CAPABILITY_LIST directly from cfg_base (BAR 1), which maps to
+     *   s->pcie_config.  Without this sync it sees PCI_STATUS_CAP_LIST=0,
+     *   immediately returns 0 ("capability not found"), and every subsequent
+     *   MSI raise call fails with "MSI capability not found".
+     *
+     * What we copy:
+     *   - PCI_STATUS (0x06-0x07): carries PCI_STATUS_CAP_LIST (bit 4).
+     *   - PCI_CAPABILITY_LIST (0x34): head pointer of the capability chain.
+     *   - The full capability region (0x40-0xff): where libvfio-user places
+     *     the MSI and MSI-X capability structures.
+     *
+     * What we deliberately skip:
+     *   - BARs (0x10-0x27): owned by the RC; must not be overwritten.
+     *   - The header fields already copied in step 4 above (0x00-0x0f,
+     *     0x28-0x3f): already consistent; re-copying is harmless but
+     *     unnecessary.
+     */
+    {
+        vfu_pci_config_space_t *vfu_cfg = vfu_pci_get_config_space(s->vfu);
+        if (vfu_cfg) {
+            uint8_t *vfu_raw = (uint8_t *)vfu_cfg;
+
+            /* PCI Status register — propagate PCI_STATUS_CAP_LIST */
+            memcpy(s->pcie_config + PCI_STATUS,
+                   vfu_raw + PCI_STATUS,
+                   sizeof(uint16_t));
+
+            /* Capability list head pointer */
+            s->pcie_config[PCI_CAPABILITY_LIST] =
+                vfu_raw[PCI_CAPABILITY_LIST];
+
+            /*
+             * Standard capability area: 0x40–0xff.
+             * libvfio-user places MSI at the first free slot (typically 0x40)
+             * and MSI-X immediately after.  Copy the full 192-byte window so
+             * the Linux capability walker finds both chains intact.
+             */
+            memcpy(s->pcie_config + 0x40, vfu_raw + 0x40, 0xc0);
+
+            qemu_epc_debug("%s: synced vfu caps to pcie_config: "
+                           "status=0x%04x cap_list=0x%02x",
+                           __func__,
+                           *(uint16_t *)(s->pcie_config + PCI_STATUS),
+                           s->pcie_config[PCI_CAPABILITY_LIST]);
+        } else {
+            qemu_epc_debug("%s: WARNING: vfu_pci_get_config_space returned NULL "
+                           "after realize; Linux driver will not find MSI/MSI-X "
+                           "capabilities", __func__);
+        }
+    }
+
     s->vfu_fd = vfu_get_poll_fd(s->vfu);
     if (s->vfu_fd < 0) {
         qemu_epc_debug("%s: failed at vfu_get_poll_fd (ret=%d errno=%d)",

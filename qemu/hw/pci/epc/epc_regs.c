@@ -85,11 +85,20 @@ uint64_t qepc_ctrl_mmio_read(void *opaque, hwaddr addr, unsigned size) {
     /* Return the upper 32 bits of the outbound window base address */
     return s->ob_window_mr.addr >> 32;
   case QEPC_CTRL_OFF_WIN_SIZE:
-    /* Return the lower 32 bits of the outbound window size */
-    return OB_WINDOW_SIZE & 0xffffffff;
+    /*
+     * Return the lower 32 bits of the total outbound aperture size.
+     *
+     * The EPC memory pool (pci_epc_mem_init) is initialised with this value
+     * as its capacity.  Returning only OB_WINDOW_SIZE (one slot) meant that
+     * pci_epc_mem_alloc_addr() would only ever hand out addresses in the
+     * first window's physical range, which is correct — but we should
+     * advertise the full aperture so that the pool can in principle service
+     * many simultaneous allocations without exhaustion.
+     */
+    return ((uint64_t)NUM_OB_WINDOW * OB_WINDOW_SIZE) & 0xffffffff;
   case QEPC_CTRL_OFF_WIN_SIZE + sizeof(uint32_t):
-    /* Return the upper 32 bits of the outbound window size */
-    return OB_WINDOW_SIZE >> 32;
+    /* Return the upper 32 bits of the total outbound aperture size */
+    return ((uint64_t)NUM_OB_WINDOW * OB_WINDOW_SIZE) >> 32;
   case QEPC_CTRL_OFF_OB_MASK:
     /* Return the bitmask of currently active outbound mappings */
     return s->ob_mask;
@@ -257,9 +266,14 @@ void qepc_handle_single_window_setup(QEPCState *s, uint32_t idx, bool enable) {
 
   /*
    * QEMU RAM pointers and subregions require page alignment (typically 4KB).
-   * We round up the size to ensure the memory sub-system accepts the mapping.
+   * Round up the size to the next 4 KiB boundary so that:
+   *   a) the MemoryRegion is never smaller than one page, and
+   *   b) a non-page-aligned size (e.g. 0xfa001) doesn't leave a partial
+   *      page at the tail that QEMU's memory subsystem may reject.
    */
-  uint64_t map_size = (s->obs[idx].size < 4096) ? 4096 : s->obs[idx].size;
+  uint64_t map_size = ROUND_UP(s->obs[idx].size, 4096);
+  if (map_size == 0)
+    map_size = 4096;
 
   for (int j = 0; j < SUPPORT_RC_NUM_MRS; j++) {
     /* Skip empty or unmapped Root Complex regions */
@@ -278,11 +292,17 @@ void qepc_handle_single_window_setup(QEPCState *s, uint32_t idx, bool enable) {
       void *host_vaddr = (uint8_t *)s->rc_mrs[j].vaddr + off;
 
       /*
-       * Outbound windows are accessed at fixed offsets within the Outbound
-       * BAR. This offset must match the OB_WINDOW_SIZE configured in the EP
-       * driver.
+       * The window offset within ob_window_mr must match the byte offset of
+       * obs[idx].phys from the aperture base address (ob_window_mr.addr).
+       * This is the physical address that pci_epc_mem_alloc_addr() handed to
+       * the EP driver, so ioremap(obs[idx].phys) maps exactly this offset.
+       *
+       * Using idx * OB_WINDOW_SIZE was wrong: the EPC memory pool allocates
+       * addresses sequentially from the aperture base without honouring
+       * window-index boundaries, so window N's physical address is NOT
+       * necessarily at base + N * OB_WINDOW_SIZE.
        */
-      hwaddr window_offset = (hwaddr)idx * OB_WINDOW_SIZE;
+      hwaddr window_offset = (hwaddr)(s->obs[idx].phys - s->ob_window_mr.addr);
 
       /*
        * Clean up any existing mapping if the guest is re-configuring an
