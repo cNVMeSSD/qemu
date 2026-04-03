@@ -78,21 +78,19 @@
 void qepc_dma_register(vfu_ctx_t *vfu_ctx, vfu_dma_info_t *info) {
   QEPCState *s = vfu_get_private(vfu_ctx);
 
-  qemu_epc_debug(
-      "%s: register iova=[0x%lx..0x%lx) len=0x%lx vaddr=%p prot=0x%x",
-      __func__, (uint64_t)info->iova.iov_base,
+  trace_qepc_dma_register(
+      (uint64_t)info->iova.iov_base,
       (uint64_t)info->iova.iov_base + info->iova.iov_len,
       (uint64_t)info->iova.iov_len, info->vaddr, info->prot);
 
   if (!info->vaddr) {
-    qemu_epc_debug("%s: shared memory is required: vaddr is NULL", __func__);
+    trace_qepc_dma_register_no_vaddr();
     return;
   }
 
   if (s->rc_mr_idx == SUPPORT_RC_NUM_MRS) {
     /* TODO: Grow this table dynamically or fail the DMA registration. */
-    qemu_epc_debug("%s: unsupported: rc_mrs table full (%d entries, max=%d)",
-                   __func__, s->rc_mr_idx, SUPPORT_RC_NUM_MRS);
+    trace_qepc_dma_register_table_full(s->rc_mr_idx, SUPPORT_RC_NUM_MRS);
     return;
   }
 
@@ -102,11 +100,10 @@ void qepc_dma_register(vfu_ctx_t *vfu_ctx, vfu_dma_info_t *info) {
       .vaddr   = info->vaddr,
   };
 
-  qemu_epc_debug("%s: stored rc_mrs[%d]: rc_phys=0x%lx size=0x%lx vaddr=%p",
-                 __func__, s->rc_mr_idx,
-                 (unsigned long)s->rc_mrs[s->rc_mr_idx].rc_phys,
-                 (unsigned long)s->rc_mrs[s->rc_mr_idx].size,
-                 s->rc_mrs[s->rc_mr_idx].vaddr);
+  trace_qepc_dma_register_stored(s->rc_mr_idx,
+      s->rc_mrs[s->rc_mr_idx].rc_phys,
+      s->rc_mrs[s->rc_mr_idx].size,
+      s->rc_mrs[s->rc_mr_idx].vaddr);
 
   s->rc_mr_idx++;
 }
@@ -151,10 +148,10 @@ void qepc_dma_register(vfu_ctx_t *vfu_ctx, vfu_dma_info_t *info) {
 void qepc_dma_unregister(vfu_ctx_t *vfu_ctx, vfu_dma_info_t *info) {
   QEPCState *s = vfu_get_private(vfu_ctx);
 
-  qemu_epc_debug("%s: unregister iova=[0x%lx..0x%lx) len=0x%lx vaddr=%p",
-                 __func__, (uint64_t)info->iova.iov_base,
-                 (uint64_t)info->iova.iov_base + info->iova.iov_len,
-                 (uint64_t)info->iova.iov_len, info->vaddr);
+  trace_qepc_dma_unregister(
+      (uint64_t)info->iova.iov_base,
+      (uint64_t)info->iova.iov_base + info->iova.iov_len,
+      (uint64_t)info->iova.iov_len, info->vaddr);
 
   /*
    * Walk rc_mrs[] to find the entry that matches the unregistered region.
@@ -166,10 +163,8 @@ void qepc_dma_unregister(vfu_ctx_t *vfu_ctx, vfu_dma_info_t *info) {
         s->rc_mrs[i].size    == info->iova.iov_len             &&
         s->rc_mrs[i].vaddr   == info->vaddr) {
 
-      qemu_epc_debug(
-          "%s: found matching rc_mrs[%d], rc_phys=0x%lx size=0x%lx vaddr=%p",
-          __func__, i, (unsigned long)s->rc_mrs[i].rc_phys,
-          (unsigned long)s->rc_mrs[i].size, s->rc_mrs[i].vaddr);
+      trace_qepc_dma_unregister_found(i, s->rc_mrs[i].rc_phys,
+          s->rc_mrs[i].size, s->rc_mrs[i].vaddr);
 
       /*
        * Unmap any OB windows whose PCI address range lies entirely within
@@ -187,9 +182,7 @@ void qepc_dma_unregister(vfu_ctx_t *vfu_ctx, vfu_dma_info_t *info) {
         if (pci >= s->rc_mrs[i].rc_phys &&
             (pci + sz) <= (s->rc_mrs[i].rc_phys + s->rc_mrs[i].size)) {
 
-          qemu_epc_debug("%s: removing fast mapping for ob window %d "
-                         "(pci=0x%lx size=0x%lx)",
-                         __func__, w, (unsigned long)pci, (unsigned long)sz);
+          trace_qepc_dma_unregister_remove_ob(w, pci, sz);
 
           /* Remove the per-window subregion from the OB aperture container. */
           memory_region_del_subregion(&s->ob_window_mr, &s->rc_local_mr[w]);
@@ -218,12 +211,11 @@ void qepc_dma_unregister(vfu_ctx_t *vfu_ctx, vfu_dma_info_t *info) {
         s->rc_mrs[s->rc_mr_idx].vaddr   = NULL;
       }
 
-      qemu_epc_debug("%s: rc_mrs compacted, new rc_mr_idx=%d", __func__,
-                     s->rc_mr_idx);
+      trace_qepc_dma_unregister_compact(s->rc_mr_idx);
       return;
     }
   }
 
   /* No matching entry found — log for debugging; nothing else to do. */
-  qemu_epc_debug("%s: no matching rc_mr found for unregister", __func__);
+  trace_qepc_dma_unregister_not_found();
 }

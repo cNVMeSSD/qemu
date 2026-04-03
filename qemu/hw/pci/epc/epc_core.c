@@ -113,9 +113,7 @@ static void qepc_realize(PCIDevice *pci_dev, Error **errp)
     s->doorbell_bar    = 0xFF; /* sentinel: no doorbell configured */
     s->doorbell_offset = 0;
 
-    qemu_epc_debug(
-        "initializing control BAR memory region: size=0x%lx (raw=0x%x)",
-        (unsigned long)pow2ceil(QEPC_CTRL_SIZE), QEPC_CTRL_SIZE);
+    trace_qepc_realize_ctrl_bar((uint64_t)pow2ceil(QEPC_CTRL_SIZE), QEPC_CTRL_SIZE);
     memory_region_init_io(&s->ctrl_mr, OBJECT(s), &qepc_ctrl_mmio_ops, s,
                           "qemu-epc/ctrl", pow2ceil(QEPC_CTRL_SIZE));
 
@@ -123,9 +121,7 @@ static void qepc_realize(PCIDevice *pci_dev, Error **errp)
      * Allocate page-aligned backing for PCIe config space so that it can be
      * safely mapped as RAM by KVM without triggering alignment errors.
      */
-    qemu_epc_debug(
-        "requesting UA-aligned PCI config space memory region: size=0x%lx ptr=%p",
-        (unsigned long)PCIE_CONFIG_SPACE_SIZE, s->pcie_config);
+    trace_qepc_realize_pci_config_alloc((uint64_t)PCIE_CONFIG_SPACE_SIZE, s->pcie_config);
     size_t page_size = qemu_real_host_page_size();
     s->pcie_config = qemu_memalign(page_size, PCIE_CONFIG_SPACE_SIZE);
     if (!s->pcie_config) {
@@ -144,23 +140,16 @@ static void qepc_realize(PCIDevice *pci_dev, Error **errp)
      */
 
 
-    qemu_epc_debug(
-        "initializing PCI config space memory region: size=0x%lx ptr=%p",
-        (unsigned long)PCIE_CONFIG_SPACE_SIZE, s->pcie_config);
+    trace_qepc_realize_pci_config_init((uint64_t)PCIE_CONFIG_SPACE_SIZE, s->pcie_config);
     memory_region_init_ram_ptr(&s->pci_cfg_mr, OBJECT(s), "qemu-epc/cfg-cfg",
                                PCIE_CONFIG_SPACE_SIZE, s->pcie_config);
 
-    qemu_epc_debug(
-        "initializing BAR config memory region: size=0x%lx (raw=0x%x)",
-        (unsigned long)pow2ceil(QEPC_BAR_CFG_SIZE), QEPC_BAR_CFG_SIZE);
+    trace_qepc_realize_bar_cfg((uint64_t)pow2ceil(QEPC_BAR_CFG_SIZE), QEPC_BAR_CFG_SIZE);
     memory_region_init_io(&s->bar_cfg_mr, OBJECT(s), &qemu_epc_mmio_bar_cfg_ops,
                           s, "qemu-epc/bar-cfg", pow2ceil(QEPC_BAR_CFG_SIZE));
 
-    qemu_epc_debug(
-        "initializing outbound window memory region: size=0x%lx "
-        "(windows=%d window_size=0x%llx)",
-        (unsigned long)pow2ceil(NUM_OB_WINDOW * OB_WINDOW_SIZE),
-        NUM_OB_WINDOW, (unsigned long long)OB_WINDOW_SIZE);
+    trace_qepc_realize_ob_window((uint64_t)pow2ceil(NUM_OB_WINDOW * OB_WINDOW_SIZE),
+        NUM_OB_WINDOW, (uint64_t)OB_WINDOW_SIZE);
     memory_region_init(&s->ob_window_mr, NULL, "qemu-epc/ob",
                        pow2ceil(NUM_OB_WINDOW * OB_WINDOW_SIZE));
 
@@ -191,12 +180,12 @@ static void qepc_exit(PCIDevice *pci_dev)
 {
     QEPCState *s = QEMU_EPC(pci_dev);
 
-    qemu_epc_debug("%s: exit called", __func__);
+    trace_qepc_exit();
 
     /* Remove any per-window fast mappings */
     for (int i = 0; i < NUM_OB_WINDOW; i++) {
         if (s->ob_fast_mapped[i]) {
-            qemu_epc_debug("%s: removing rc_local_mr[%d] subregion", __func__, i);
+            trace_qepc_exit_unmap_ob(i);
             memory_region_del_subregion(&s->ob_window_mr, &s->rc_local_mr[i]);
             s->ob_fast_mapped[i] = false;
         }
@@ -204,15 +193,14 @@ static void qepc_exit(PCIDevice *pci_dev)
 
     /* Destroy vfu context if present */
     if (s->vfu) {
-        qemu_epc_debug("%s: destroying vfu ctx", __func__);
+        trace_qepc_exit_destroy_vfu();
         vfu_destroy_ctx(s->vfu);
         s->vfu = NULL;
     }
 
     /* Clear fd handler if one was installed */
     if (s->vfu_fd >= 0) {
-        qemu_epc_debug("%s: clearing vfu fd handler (fd=%d)", __func__,
-                       s->vfu_fd);
+        trace_qepc_exit_clear_fd(s->vfu_fd);
         qemu_set_fd_handler(s->vfu_fd, NULL, NULL, NULL);
         s->vfu_fd = -1;
     }
@@ -243,7 +231,7 @@ static void qepc_object_set_path(Object *obj, const char *str, Error **errp)
 {
     QEPCState *s = QEMU_EPC(obj);
 
-    qemu_epc_debug("socket path: %s", str);
+    trace_qepc_set_path(str);
     s->sock_path = g_strdup(str);
 }
 
@@ -268,7 +256,7 @@ static void qepc_class_init(ObjectClass *klass, const void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     PCIDeviceClass *k = PCI_DEVICE_CLASS(klass);
 
-    qemu_epc_debug("initialize class");
+    trace_qepc_class_init();
 
     object_class_property_add_str(klass, "sock-path", NULL,
                                   qepc_object_set_path);

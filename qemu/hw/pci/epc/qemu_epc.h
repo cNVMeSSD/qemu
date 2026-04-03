@@ -28,7 +28,8 @@
 #include "qemu/osdep.h"
 #include "qom/object.h"
 
-#include "qemu/log.h"
+#include "libvfio-user.h"
+
 #include "qemu/memalign.h"
 
 #include "qapi/error.h"
@@ -38,22 +39,16 @@
 #include "hw/pci/pci_device.h"
 #include "hw/remote/vfio-user-obj.h"
 
-#include "libvfio-user.h"
 
 /* =========================================================================
  * Debug logging
  * ========================================================================= */
 
-/* Uncomment to enable verbose debug logging for this device. */
-#define DEBUG_QEMU_EPC
-#ifdef DEBUG_QEMU_EPC
-#define qemu_epc_debug(fmt, ...) qemu_log("qemu_epc: " fmt "\n", ##__VA_ARGS__)
-#else
-#define qemu_epc_debug(...)                                                    \
-  do {                                                                         \
-  } while (0)
-#endif
-
+/*
+ * Tracing is handled via the QEMU trace event framework.  trace.h is
+ * auto-generated from hw/pci/epc/trace-events during the build.
+ */
+#include "trace.h"
 /* =========================================================================
  * Constants
  * ========================================================================= */

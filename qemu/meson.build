@@ -3694,6 +3694,7 @@ if have_system
     'hw/nvme',
     'hw/nvram',
     'hw/pci',
+    'hw/pci/epc',
     'hw/pci-host',
     'hw/ppc',
     'hw/rtc',

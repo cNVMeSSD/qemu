@@ -1,0 +1,203 @@
+# See docs/devel/tracing.rst for syntax documentation.
+#
+# hw/pci/epc/ — QEMU PCI Endpoint Controller (EPC) trace events
+#
+# Grouped by source file.  Events that require no parameters are left as
+# qemu_epc_debug() calls with a TODO comment in the source until the tracing
+# infrastructure supports parameter-less events cleanly.
+
+# -------------------------------------------------------------------------
+# epc_core.c — QOM lifecycle: realize, exit, class/type init, properties
+# -------------------------------------------------------------------------
+
+# qepc_realize
+qepc_realize_ctrl_bar(uint64_t size, uint32_t raw) "ctrl_bar size=0x%"PRIx64" (raw=0x%x)"
+qepc_realize_pci_config_alloc(uint64_t size, void *ptr) "pci_config_alloc size=0x%"PRIx64" ptr=%p"
+qepc_realize_pci_config_init(uint64_t size, void *ptr) "pci_config_init size=0x%"PRIx64" ptr=%p"
+qepc_realize_bar_cfg(uint64_t size, uint32_t raw) "bar_cfg size=0x%"PRIx64" (raw=0x%x)"
+qepc_realize_ob_window(uint64_t size, int windows, uint64_t window_size) "ob_window size=0x%"PRIx64" windows=%d window_size=0x%"PRIx64
+
+# qepc_exit
+qepc_exit(void) "exit called"
+qepc_exit_unmap_ob(int i) "removing rc_local_mr[%d] subregion"
+qepc_exit_destroy_vfu(void) "destroying vfu ctx"
+qepc_exit_clear_fd(int fd) "clearing vfu fd handler fd=%d"
+
+# qepc_object_set_path
+qepc_set_path(const char *path) "socket path: %s"
+
+# qepc_class_init
+qepc_class_init(void) "initialize class"
+
+# -------------------------------------------------------------------------
+# epc_mem.c — DMA region registration / unregistration helpers
+# -------------------------------------------------------------------------
+
+# qepc_dma_register
+qepc_dma_register(uint64_t base, uint64_t end, uint64_t len, void *vaddr, int prot) "iova=[0x%"PRIx64"..0x%"PRIx64") len=0x%"PRIx64" vaddr=%p prot=0x%x"
+qepc_dma_register_no_vaddr(void) "shared memory required: vaddr is NULL"
+qepc_dma_register_table_full(int idx, int max) "rc_mrs table full %d entries max=%d"
+qepc_dma_register_stored(int idx, uint64_t rc_phys, uint64_t size, void *vaddr) "stored rc_mrs[%d] rc_phys=0x%"PRIx64" size=0x%"PRIx64" vaddr=%p"
+
+# qepc_dma_unregister
+qepc_dma_unregister(uint64_t base, uint64_t end, uint64_t len, void *vaddr) "iova=[0x%"PRIx64"..0x%"PRIx64") len=0x%"PRIx64" vaddr=%p"
+qepc_dma_unregister_found(int i, uint64_t rc_phys, uint64_t size, void *vaddr) "found rc_mrs[%d] rc_phys=0x%"PRIx64" size=0x%"PRIx64" vaddr=%p"
+qepc_dma_unregister_remove_ob(int w, uint64_t pci, uint64_t size) "removing fast mapping ob window %d pci=0x%"PRIx64" size=0x%"PRIx64
+qepc_dma_unregister_compact(int idx) "rc_mrs compacted new rc_mr_idx=%d"
+qepc_dma_unregister_not_found(void) "no matching rc_mr found for unregister"
+
+# -------------------------------------------------------------------------
+# epc_regs.c — guest MMIO handlers: ctrl BAR and BAR-cfg read/write
+# -------------------------------------------------------------------------
+
+# qepc_ctrl_mmio_read
+qepc_ctrl_read(uint64_t addr, uint32_t size) "addr=0x%"PRIx64" size=0x%x"
+qepc_ctrl_read_unaligned(uint32_t size) "unaligned access size=%u"
+qepc_ctrl_read_unhandled(uint64_t addr) "unhandled offset=0x%"PRIx64
+
+# qepc_handle_ctrl_irq
+qepc_handle_ctrl_irq(int irq_num, uint32_t irq_type) "trigger IRQ irq_num=%d type=%u"
+qepc_handle_ctrl_irq_unsupported(uint32_t irq_type) "unsupported IRQ type=%u"
+qepc_handle_ctrl_irq_failed(int ret, int err) "vfu_irq_trigger failed ret=%d errno=%d"
+
+# qepc_handle_single_window_setup
+qepc_ob_window_unmap(uint32_t idx) "unmapping OB window %u"
+qepc_ob_window_enable_msi(uint32_t idx, uint64_t pci) "enabling MSI OB window %u pci=0x%"PRIx64
+qepc_ob_window_enabled(uint32_t idx, uint64_t offset, uint64_t pci) "enabled window %u offset=0x%"PRIx64" -> pci=0x%"PRIx64
+qepc_ob_window_no_rc_region(uint64_t pci) "no host RC region for pci=0x%"PRIx64
+
+# qepc_handle_dma_start
+qepc_dma_start_alloc_failed(uint32_t len) "g_malloc(%u) failed"
+qepc_dma_start_read_failed(uint32_t ret, uint64_t src, uint32_t len) "pci_dma_read failed ret=%u src=0x%"PRIx64" len=%u"
+qepc_dma_start_write_failed(uint32_t ret, uint64_t dst, uint32_t len) "pci_dma_write failed ret=%u dst=0x%"PRIx64" len=%u"
+qepc_dma_start_complete(uint64_t src, uint64_t dst, uint32_t len) "DMA complete src=0x%"PRIx64" dst=0x%"PRIx64" len=%u"
+
+# qepc_ctrl_mmio_write
+qepc_ctrl_write(uint64_t addr, uint32_t size, uint64_t val) "addr=0x%"PRIx64" size=%u val=0x%"PRIx64
+qepc_ctrl_write_unaligned(uint32_t size) "unaligned access size=%u"
+qepc_ctrl_write_irq_type(uint64_t val) "IRQ_TYPE val=0x%"PRIx64
+qepc_ctrl_write_irq_num(uint64_t val) "IRQ_NUM val=%"PRIu64
+qepc_ctrl_write_ob_idx_invalid(uint64_t val) "invalid ob_idx %"PRIu64
+qepc_ctrl_write_ob_idx(uint32_t idx) "ob_idx=%u"
+qepc_ctrl_write_ob_phys(uint32_t idx, uint64_t phys) "ob phys win=%u addr=0x%"PRIx64
+qepc_ctrl_write_ob_pci(uint32_t idx, uint64_t pci) "ob pci win=%u addr=0x%"PRIx64
+qepc_ctrl_write_ob_size(uint32_t idx, uint64_t size) "ob size win=%u size=0x%"PRIx64
+qepc_ctrl_write_msix_num_invalid(uint64_t val) "invalid MSIX_NUM %"PRIu64
+qepc_ctrl_write_msix_num(uint16_t num, uint32_t tbl_size, uint32_t pba_size) "MSIX_NUM=%u table_size=0x%x pba_size=0x%x"
+qepc_ctrl_write_msix_tbl_bar_invalid(uint64_t val) "invalid MSIX_TBL_BAR %"PRIu64
+qepc_ctrl_write_msix_tbl_bar(uint32_t bar) "MSIX_TBL_BAR=%u"
+qepc_ctrl_write_msix_tbl_off(uint32_t off) "MSIX_TBL_OFF=0x%x"
+qepc_ctrl_write_msix_pba_bar_invalid(uint64_t val) "invalid MSIX_PBA_BAR %"PRIu64
+qepc_ctrl_write_msix_pba_bar(uint32_t bar) "MSIX_PBA_BAR=%u"
+qepc_ctrl_write_msix_pba_off(uint32_t off) "MSIX_PBA_OFF=0x%x"
+qepc_ctrl_write_msix_cfg_ignore(uint64_t val) "MSIX_CFG: ignoring val=%"PRIu64
+qepc_ctrl_write_msix_cfg_no_num(void) "MSIX_CFG: msix_num not set, ignoring commit"
+qepc_ctrl_write_msix_cfg_commit(uint16_t num, uint32_t tbl_bar, uint32_t tbl_off, uint32_t pba_bar, uint32_t pba_off) "MSIX_CFG committed num=%u tbl_bar=%u tbl_off=0x%x pba_bar=%u pba_off=0x%x"
+qepc_ctrl_write_msi_cfg_invalid(uint64_t val) "invalid MSI_CFG %"PRIu64
+qepc_ctrl_write_msi_cfg_not_pow2(uint64_t val) "MSI_CFG %"PRIu64" not power of two"
+qepc_ctrl_write_msi_cfg_commit(uint32_t num) "MSI_CFG=%u vectors committed"
+qepc_ctrl_write_db_bar_invalid(uint64_t val) "invalid DB_BAR %"PRIu64
+qepc_ctrl_write_db_bar(uint32_t bar) "doorbell BAR=%u"
+qepc_ctrl_write_db_off(uint32_t off) "doorbell offset=0x%x"
+qepc_ctrl_write_dma_len(uint32_t len) "DMA_LEN=0x%x"
+qepc_ctrl_write_dma_status_ignored(void) "guest write to DMA_STATUS ignored"
+qepc_ctrl_write_ob_enable_before(uint32_t idx, uint32_t val, uint8_t ob_mask, int enabled_before) "OB_ENABLE_WRITE idx=%u val=%u ob_mask=0x%02x enabled_before=%d"
+qepc_ctrl_write_ob_enable_window(uint32_t idx, uint64_t phys, uint64_t pci, uint64_t size) "Enabling window %u: phys=0x%"PRIx64" pci=0x%"PRIx64" size=0x%"PRIx64
+qepc_ctrl_write_ob_disable_window(uint32_t idx) "Disabling window %u"
+qepc_ctrl_write_ob_enable_after(uint32_t idx, uint8_t ob_mask, int enabled_after) "OB_ENABLE_WRITE idx=%u ob_mask_after=0x%02x enabled_after=%d"
+qepc_ctrl_write_dma_start(uint64_t src, uint64_t dst, uint32_t len) "DMA_START src=0x%"PRIx64" dst=0x%"PRIx64" len=0x%x"
+qepc_ctrl_write_invalid_addr(uint64_t addr) "invalid address=0x%"PRIx64
+
+# qepc_cfg_bar_write
+qepc_cfg_bar_write(uint64_t addr, uint32_t size, uint64_t val) "addr=0x%"PRIx64" size=%u val=0x%"PRIx64
+qepc_cfg_bar_write_overrun(uint64_t end) "overrun at %"PRIu64
+qepc_cfg_bar_write_mask(uint32_t mask) "bar_mask=0x%x"
+qepc_cfg_bar_write_number_invalid(uint64_t val) "invalid BAR number %"PRIu64
+qepc_cfg_bar_write_number(uint32_t bar) "bar_no=%u"
+qepc_cfg_bar_write_flags_invalid(uint32_t bar) "FLAGS invalid bar_no=%u"
+qepc_cfg_bar_write_flags(int bar, uint32_t lo, uint32_t flags) "bar[%d] FLAGS lo=0x%x flags=0x%x"
+qepc_cfg_bar_write_phys_invalid(uint32_t bar) "PHYS_ADDR invalid bar_no=%u"
+qepc_cfg_bar_write_phys(int bar, uint64_t val, uint64_t cfg_lo) "bar[%d] PHYS_ADDR=0x%"PRIx64" cfg_lo=0x%"PRIx64
+qepc_cfg_bar_write_size_invalid(uint32_t bar) "SIZE invalid bar_no=%u"
+qepc_cfg_bar_write_size_zero(uint32_t bar) "ignoring zero-sized BAR %u"
+qepc_cfg_bar_write_size(int bar, uint64_t size) "bar[%d] SIZE=0x%"PRIx64
+
+# -------------------------------------------------------------------------
+# epc_vfu.c — vfio-user socket and remote RC callback lifecycle
+# -------------------------------------------------------------------------
+
+# qepc_vfu_log
+qepc_vfu_log(int level, const char *msg) "vfu level=%d: %s"
+
+# qepc_vfu_run
+qepc_vfu_run_start(int fd) "starting vfu main loop fd=%d"
+qepc_vfu_run_eintr(void) "vfu_run_ctx interrupted (EINTR), retrying"
+qepc_vfu_run_disconnect(void) "vfu_run_ctx: client disconnected (ENOTCONN)"
+qepc_vfu_run_failed(int err, int errno_val) "vfu_run_ctx failed err=%d errno=%d"
+qepc_vfu_run_exit_loop(void) "vfu_run_ctx returned 0, exiting loop"
+qepc_vfu_run_leaving(void) "leaving vfu main loop"
+
+# qepc_vfu_attach_ctx
+qepc_vfu_attach_start(int fd) "attach vfu client requested fd=%d"
+qepc_vfu_attach_remove_handler(int fd) "removing previous fd handler fd=%d"
+qepc_vfu_attach_retry(void) "vfu_attach_ctx returned EAGAIN/EWOULDBLOCK, retrying"
+qepc_vfu_attach_failed(int err, int errno_val) "vfu_attach_ctx failed err=%d errno=%d"
+qepc_vfu_attach_poll_fd_failed(void) "vfu_get_poll_fd failed"
+qepc_vfu_attach_done(int fd) "vfu client attached poll fd=%d"
+
+# qepc_pci_cfg_access_bar
+qepc_pci_cfg_access_bar(const char *dir, uint64_t offset, uint64_t size) "%s offset=0x%"PRIx64" size=0x%"PRIx64
+qepc_pci_cfg_bar_low_write(int bar, uint32_t host, uint32_t stored, uint32_t size) "BAR%d low write host=0x%x stored=0x%x size=0x%x"
+qepc_pci_cfg_bar_high_write(int bar, uint32_t val) "BAR%d high write val=0x%x"
+qepc_pci_cfg_bar_generic_write(uint64_t off, uint32_t val) "generic BAR cfg write off=0x%"PRIx64" val=0x%x"
+qepc_pci_cfg_bar_read(uint64_t off, uint32_t val) "cfg BAR read off=0x%"PRIx64" val=0x%x"
+
+# qepc_pci_cfg_access
+qepc_pci_cfg_access(const char *dir, uint64_t offset, uint64_t size) "%s offset=0x%"PRIx64" size=0x%"PRIx64
+qepc_pci_cfg_access_mirror(uint64_t offset, uint64_t size) "mirrored write offset=0x%"PRIx64" size=0x%"PRIx64" into vfu config space"
+qepc_pci_cfg_access_write(uint64_t offset, uint64_t count) "write offset=0x%"PRIx64" count=%"PRIu64
+qepc_pci_cfg_access_read_mirror(uint64_t offset, uint64_t count) "read from vfu mirror offset=0x%"PRIx64" count=%"PRIu64
+qepc_pci_cfg_access_read_shadow(uint64_t offset, uint64_t count) "read from shadow offset=0x%"PRIx64" count=%"PRIu64
+
+# qepc_bar_access_log_hex / qepc_bar_access
+qepc_bar_access_log_hex(const char *prefix, uint64_t addr, uint64_t count, const char *hexbuf) "%s addr=0x%"PRIx64" size=%"PRIu64" data=%s"
+qepc_bar_access(uint32_t bar, uint64_t offset, uint64_t size, const char *dir) "bar=%u offset=0x%"PRIx64" size=0x%"PRIx64" %s"
+qepc_bar_access_invalid_bar(uint32_t bar) "invalid BAR %u"
+qepc_bar_access_disabled(uint32_t bar, uint32_t mask) "access to disabled BAR %u bar_mask=0x%x"
+qepc_bar_access_oob(uint32_t bar, uint64_t off, uint64_t size, uint64_t bar_size) "BAR %u out-of-bounds off=0x%"PRIx64" size=0x%"PRIx64" bar_size=0x%"PRIx64
+qepc_bar_access_msix_mirror(const char *region, uint64_t off) "MSI-X %s write mirrored to vfu cfg off=0x%"PRIx64
+qepc_bar_access_doorbell(uint32_t bar, uint64_t offset, uint32_t val) "doorbell ring on BAR%u offset=0x%"PRIx64" val=0x%x"
+qepc_bar_access_dma_addr(uint64_t addr) "resolved DMA addr=0x%"PRIx64
+
+# qepc_ctrl_handle_start
+qepc_ctrl_handle_start(uint64_t val, const char *sock_path) "start val=0x%"PRIx64" sock_path=%s"
+qepc_ctrl_handle_start_vfu_create_failed(int err) "failed at vfu_create_ctx errno=%d"
+qepc_ctrl_handle_start_pci_init_failed(int err, int errno_val) "failed at vfu_pci_init err=%d errno=%d"
+qepc_ctrl_handle_start_header_copied(uint16_t vendor, uint16_t device, uint16_t cls) "copied header vendor=0x%04x device=0x%04x class=0x%04x"
+qepc_ctrl_handle_start_header_null(void) "vfu_pci_get_config_space returned NULL, header fields not visible to RC"
+qepc_ctrl_handle_start_cfg_setup(void) "setting up PCI config space region"
+qepc_ctrl_handle_start_cfg_failed(int err, int errno_val) "failed at vfu_setup_region (cfg) err=%d errno=%d"
+qepc_ctrl_handle_start_cfg_done(void) "PCI config space region setup complete"
+qepc_ctrl_handle_start_msi_cap_failed(int err) "vfu_pci_add_capability(MSI) failed errno=%d"
+qepc_ctrl_handle_start_msi_cap_done(uint64_t cap_off, uint32_t num) "MSI capability at offset=0x%"PRIx64" num=%u"
+qepc_ctrl_handle_start_msi_cap_skip(void) "skipping MSI capability (msi_num=0)"
+qepc_ctrl_handle_start_msix_cap_failed(int err) "vfu_pci_add_capability(MSI-X) failed errno=%d"
+qepc_ctrl_handle_start_msix_cap_done(uint64_t cap_off, uint32_t num, uint32_t tbl_bar, uint32_t tbl_off, uint32_t pba_bar, uint32_t pba_off) "MSI-X capability at offset=0x%"PRIx64" num=%u tbl_bar=%u tbl_off=0x%x pba_bar=%u pba_off=0x%x"
+qepc_ctrl_handle_start_msix_cap_skip(void) "skipping MSI-X capability (msix_num=0)"
+qepc_ctrl_handle_start_bar_setup(uint32_t mask) "setting up BAR regions bar_mask=0x%x"
+qepc_ctrl_handle_start_bar_skip(int i, uint32_t mask) "skipping disabled BAR %d bar_mask=0x%x"
+qepc_ctrl_handle_start_bar_info(int i, uint64_t phys, uint64_t size, uint32_t flags) "setup bar %d phys=0x%"PRIx64" size=0x%"PRIx64" flags=0x%x"
+qepc_ctrl_handle_start_bar_failed(int i, int err, int errno_val) "failed at vfu_setup_region bar %d err=%d errno=%d"
+qepc_ctrl_handle_start_bar_done(int i) "BAR %d region setup complete"
+qepc_ctrl_handle_start_bars_done(void) "all BAR regions setup complete"
+qepc_ctrl_handle_start_intx_failed(int err, int errno_val) "failed to setup INTx irq err=%d errno=%d"
+qepc_ctrl_handle_start_msi_irq_failed(int err, int errno_val) "failed to setup MSI irqs err=%d errno=%d"
+qepc_ctrl_handle_start_msi_irq_done(uint32_t count) "MSI irq count set to %u"
+qepc_ctrl_handle_start_msix_irq_failed(int err, int errno_val) "failed to setup MSI-X irqs err=%d errno=%d"
+qepc_ctrl_handle_start_msix_irq_done(uint32_t count) "MSI-X irq count set to %u"
+qepc_ctrl_handle_start_dma_failed(int err, int errno_val) "failed to setup dma err=%d errno=%d"
+qepc_ctrl_handle_start_realize_failed(int err, int errno_val) "failed at vfu_realize_ctx err=%d errno=%d"
+qepc_ctrl_handle_start_caps_synced(uint16_t status, uint8_t cap_list) "synced vfu caps status=0x%04x cap_list=0x%02x"
+qepc_ctrl_handle_start_caps_null(void) "WARNING: vfu_pci_get_config_space returned NULL after realize, MSI/MSI-X not visible"
+qepc_ctrl_handle_start_poll_fd_failed(int fd, int errno_val) "failed at vfu_get_poll_fd ret=%d errno=%d"
+qepc_ctrl_handle_start_listening(const char *path, int fd) "listening on %s fd=%d"

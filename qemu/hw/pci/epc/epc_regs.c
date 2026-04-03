@@ -67,14 +67,14 @@ uint64_t qepc_ctrl_mmio_read(void *opaque, hwaddr addr, unsigned size) {
   QEPCState *s = opaque;
 
   /* Log every read for debugging purposes */
-  qemu_epc_debug("CTRL read: addr 0x%lx, size 0x%x", addr, size);
+  trace_qepc_ctrl_read((uint64_t)addr, size);
 
   /*
    * All registers are naturally aligned and sized accesses are expected.
    * Log unaligned accesses for debugging, but do not enforce strict size.
    */
   if (size != sizeof(uint32_t) && size != sizeof(uint64_t)) {
-    qemu_epc_debug("%s: unaligned access size %u", __func__, size);
+    trace_qepc_ctrl_read_unaligned(size);
   }
 
   switch (addr) {
@@ -127,7 +127,7 @@ uint64_t qepc_ctrl_mmio_read(void *opaque, hwaddr addr, unsigned size) {
 
   default:
     /* For any unhandled offset, log and return 0 */
-    qemu_epc_debug("unhandled read: off %ld", addr);
+    trace_qepc_ctrl_read_unhandled((uint64_t)addr);
   }
 
   return 0;
@@ -159,8 +159,7 @@ uint64_t qepc_ctrl_mmio_read(void *opaque, hwaddr addr, unsigned size) {
 void qepc_handle_ctrl_irq(QEPCState *s, int irq_num) {
   int ret;
 
-  qemu_epc_debug("%s: trigger IRQ (irq_num=%d type=%u)", __func__, irq_num,
-                 s->irq_type);
+  trace_qepc_handle_ctrl_irq(irq_num, s->irq_type);
 
   switch (s->irq_type) {
   case IRQ_TYPE_INTX:
@@ -194,13 +193,12 @@ void qepc_handle_ctrl_irq(QEPCState *s, int irq_num) {
     break;
 
   default:
-    qemu_epc_debug("%s: unsupported IRQ type %u", __func__, s->irq_type);
+    trace_qepc_handle_ctrl_irq_unsupported(s->irq_type);
     return;
   }
 
   if (ret < 0) {
-    qemu_epc_debug("%s: vfu_irq_trigger failed (ret=%d errno=%d)", __func__,
-                   ret, errno);
+    trace_qepc_handle_ctrl_irq_failed(ret, errno);
   }
 }
 
@@ -250,7 +248,7 @@ void qepc_handle_single_window_setup(QEPCState *s, uint32_t idx, bool enable) {
   /* Handle DISABLE Command */
   if (!enable) {
     if (s->ob_fast_mapped[idx]) {
-      qemu_epc_debug("Unmapping OB window %d", idx);
+      trace_qepc_ob_window_unmap(idx);
       memory_region_del_subregion(&s->ob_window_mr, &s->rc_local_mr[idx]);
       object_unparent(OBJECT(&s->rc_local_mr[idx]));
       s->ob_fast_mapped[idx] = false;
@@ -266,8 +264,7 @@ void qepc_handle_single_window_setup(QEPCState *s, uint32_t idx, bool enable) {
 
   /* MSI window: no DMA mapping required */
   if (idx == 0) {
-    qemu_epc_debug("Enabling MSI OB window %u (PCI=0x%" PRIx64 ")",
-                   idx, s->obs[idx].pci);
+    trace_qepc_ob_window_enable_msi(idx, s->obs[idx].pci);
 
     /* Ensure no stale fast mapping exists */
     if (s->ob_fast_mapped[idx]) {
@@ -327,7 +324,7 @@ void qepc_handle_single_window_setup(QEPCState *s, uint32_t idx, bool enable) {
        * to avoid duplicate subregion entries in the container.
        */
       if (s->ob_fast_mapped[idx]) {
-        qemu_epc_debug("Unmapping OB window %d", idx);
+        trace_qepc_ob_window_unmap(idx);
         memory_region_del_subregion(&s->ob_window_mr, &s->rc_local_mr[idx]);
         object_unparent(OBJECT(&s->rc_local_mr[idx]));
       }
@@ -346,15 +343,12 @@ void qepc_handle_single_window_setup(QEPCState *s, uint32_t idx, bool enable) {
       s->ob_fast_mapped[idx] = true;
       s->ob_mask |= (1U << idx);
 
-      qemu_epc_debug("Enabled window %d: Offset 0x%" PRIx64
-                     " -> PCI 0x%" PRIx64,
-                     idx, window_offset, s->obs[idx].pci);
+      trace_qepc_ob_window_enabled(idx, (uint64_t)window_offset, s->obs[idx].pci);
       return;
     }
   }
 
-  qemu_epc_debug("%s: No Host RC region for PCI 0x%" PRIx64, __func__,
-                 s->obs[idx].pci);
+  trace_qepc_ob_window_no_rc_region(s->obs[idx].pci);
 }
 
 /* ---------------------------------------------------------------------------
@@ -391,7 +385,7 @@ void qepc_handle_dma_start(QEPCState *s)
 
     buf = g_malloc(s->dma_len);
     if (!buf) {
-        qemu_epc_debug("%s: g_malloc(%u) failed", __func__, s->dma_len);
+        trace_qepc_dma_start_alloc_failed(s->dma_len);
         s->dma_status = (uint32_t)-1;
         return;
     }
@@ -400,8 +394,7 @@ void qepc_handle_dma_start(QEPCState *s)
     ret = pci_dma_read(&s->dev, (dma_addr_t)s->dma_src, buf,
                        (dma_addr_t)s->dma_len);
     if (ret != MEMTX_OK) {
-        qemu_epc_debug("%s: pci_dma_read failed (ret=%u) src=0x%lx len=%u",
-                       __func__, ret, (unsigned long)s->dma_src, s->dma_len);
+        trace_qepc_dma_start_read_failed((uint32_t)ret, s->dma_src, s->dma_len);
         g_free(buf);
         s->dma_status = (uint32_t)-1;
         return;
@@ -411,8 +404,7 @@ void qepc_handle_dma_start(QEPCState *s)
     ret = pci_dma_write(&s->dev, (dma_addr_t)s->dma_dst, buf,
                         (dma_addr_t)s->dma_len);
     if (ret != MEMTX_OK) {
-        qemu_epc_debug("%s: pci_dma_write failed (ret=%u) dst=0x%lx len=%u",
-                       __func__, ret, (unsigned long)s->dma_dst, s->dma_len);
+        trace_qepc_dma_start_write_failed((uint32_t)ret, s->dma_dst, s->dma_len);
         g_free(buf);
         s->dma_status = (uint32_t)-1;
         return;
@@ -420,9 +412,7 @@ void qepc_handle_dma_start(QEPCState *s)
 
     g_free(buf);
     s->dma_status = 1; /* success */
-    qemu_epc_debug("%s: DMA complete: src=0x%lx dst=0x%lx len=%u",
-                   __func__, (unsigned long)s->dma_src,
-                   (unsigned long)s->dma_dst, s->dma_len);
+    trace_qepc_dma_start_complete(s->dma_src, s->dma_dst, s->dma_len);
 }
 
 /* ---------------------------------------------------------------------------
@@ -465,11 +455,10 @@ void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
   QEPCState *s = opaque;
   uint64_t tmp;
 
-  qemu_epc_debug("CTRL write: addr 0x%lx, size %u, val=0x%lx", addr, size,
-                 (unsigned long)val);
+  trace_qepc_ctrl_write((uint64_t)addr, size, val);
 
   if (size != sizeof(uint32_t) && size != sizeof(uint64_t)) {
-    qemu_epc_debug("%s: unaligned access size %u", __func__, size);
+    trace_qepc_ctrl_write_unaligned(size);
   }
 
   switch (addr) {
@@ -478,54 +467,46 @@ void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     return;
 
   case QEPC_CTRL_OFF_IRQ_TYPE:
-    qemu_epc_debug("%s: IRQ_TYPE write: val=0x%lx", __func__,
-                   (unsigned long)val);
+    trace_qepc_ctrl_write_irq_type(val);
     s->irq_type = val;
     break;
 
   case QEPC_CTRL_OFF_IRQ_NUM:
-    qemu_epc_debug("%s: IRQ_NUM write: val=%" PRIu64, __func__, val);
+    trace_qepc_ctrl_write_irq_num(val);
     qepc_handle_ctrl_irq(s, val);
     break;
 
   case QEPC_CTRL_OFF_OB_ENABLE: {
     uint8_t before_mask = s->ob_mask;
     bool before_enabled = (before_mask & (1U << s->ob_idx)) != 0;
-    fprintf(stderr,
-            "qemu_epc: OB_ENABLE_WRITE: idx=%u, val=%u, ob_mask=0x%02x, "
-            "enabled_before=%d\n",
-            s->ob_idx, (unsigned)val, before_mask, before_enabled);
+    trace_qepc_ctrl_write_ob_enable_before(s->ob_idx, (uint32_t)val,
+                                           before_mask, before_enabled);
 
     if (val) {
-      fprintf(
-          stderr,
-          "qemu_epc: Enabling window %u: Phys=0x%lx, PCI=0x%lx, Size=0x%lx\n",
-          s->ob_idx, (unsigned long)s->obs[s->ob_idx].phys,
-          (unsigned long)s->obs[s->ob_idx].pci,
-          (unsigned long)s->obs[s->ob_idx].size);
+      trace_qepc_ctrl_write_ob_enable_window(s->ob_idx,
+                                             s->obs[s->ob_idx].phys,
+                                             s->obs[s->ob_idx].pci,
+                                             s->obs[s->ob_idx].size);
     } else {
-      fprintf(stderr, "qemu_epc: Disabling window %u\n", s->ob_idx);
+      trace_qepc_ctrl_write_ob_disable_window(s->ob_idx);
     }
 
     qepc_handle_single_window_setup(s, s->ob_idx, val != 0);
 
     uint8_t after_mask = s->ob_mask;
     bool after_enabled = (after_mask & (1U << s->ob_idx)) != 0;
-    fprintf(stderr,
-            "qemu_epc: OB_ENABLE_WRITE: idx=%u, ob_mask after=0x%02x, "
-            "enabled_after=%d\n",
-            s->ob_idx, after_mask, after_enabled);
+    trace_qepc_ctrl_write_ob_enable_after(s->ob_idx, after_mask, after_enabled);
   } break;
     break;
     break;
 
   case QEPC_CTRL_OFF_OB_IDX:
     if (val >= NUM_OB_WINDOW) {
-      qemu_epc_debug("%s: invalid ob_idx %" PRIu64, __func__, val);
+      trace_qepc_ctrl_write_ob_idx_invalid(val);
       return;
     }
     s->ob_idx = val;
-    qemu_epc_debug("%s: ob_idx set to %u", __func__, s->ob_idx);
+    trace_qepc_ctrl_write_ob_idx(s->ob_idx);
     break;
 
   /* --- Outbound window physical address --- */
@@ -538,7 +519,7 @@ void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     tmp = s->obs[s->ob_idx].phys;
     tmp = (tmp & 0xffffffff) | (val << 32);
     s->obs[s->ob_idx].phys = tmp;
-    qemu_epc_debug("ob map phys: %d: 0x%lx", s->ob_idx, tmp);
+    trace_qepc_ctrl_write_ob_phys(s->ob_idx, tmp);
     break;
 
   /* --- Outbound window PCI address --- */
@@ -551,7 +532,7 @@ void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     tmp = s->obs[s->ob_idx].pci;
     tmp = (tmp & 0xffffffff) | (val << 32);
     s->obs[s->ob_idx].pci = tmp;
-    qemu_epc_debug("ob map pci: %d: 0x%lx", s->ob_idx, tmp);
+    trace_qepc_ctrl_write_ob_pci(s->ob_idx, tmp);
     break;
 
   /* --- Outbound window size --- */
@@ -564,7 +545,7 @@ void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     tmp = s->obs[s->ob_idx].size;
     tmp = (tmp & 0xffffffff) | (val << 32);
     s->obs[s->ob_idx].size = tmp;
-    qemu_epc_debug("ob map size: %d: 0x%lx", s->ob_idx, tmp);
+    trace_qepc_ctrl_write_ob_size(s->ob_idx, tmp);
     break;
 
   /* -----------------------------------------------------------------------
@@ -579,8 +560,7 @@ void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
 
   case QEPC_CTRL_OFF_MSIX_NUM:
     if (val == 0 || val > 2048) {
-      qemu_epc_debug("%s: invalid MSIX_NUM %" PRIu64 " (must be 1-2048)",
-                     __func__, val);
+      trace_qepc_ctrl_write_msix_num_invalid(val);
       return;
     }
     s->msix_num = (uint16_t)val;
@@ -590,36 +570,35 @@ void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
      */
     s->msix_table_size = s->msix_num * 16;
     s->msix_pba_size   = ((s->msix_num + 63) / 64) * 8;
-    qemu_epc_debug("%s: MSIX_NUM=%u table_size=0x%x pba_size=0x%x", __func__,
-                   s->msix_num, s->msix_table_size, s->msix_pba_size);
+    trace_qepc_ctrl_write_msix_num(s->msix_num, s->msix_table_size, s->msix_pba_size);
     break;
 
   case QEPC_CTRL_OFF_MSIX_TBL_BAR:
     if (val >= PCI_NUM_REGIONS) {
-      qemu_epc_debug("%s: invalid MSIX_TBL_BAR %" PRIu64, __func__, val);
+      trace_qepc_ctrl_write_msix_tbl_bar_invalid(val);
       return;
     }
     s->msix_table_bar = (uint8_t)val;
-    qemu_epc_debug("%s: MSIX_TBL_BAR=%u", __func__, s->msix_table_bar);
+    trace_qepc_ctrl_write_msix_tbl_bar(s->msix_table_bar);
     break;
 
   case QEPC_CTRL_OFF_MSIX_TBL_OFF:
     s->msix_table_off = (uint32_t)val;
-    qemu_epc_debug("%s: MSIX_TBL_OFF=0x%x", __func__, s->msix_table_off);
+    trace_qepc_ctrl_write_msix_tbl_off(s->msix_table_off);
     break;
 
   case QEPC_CTRL_OFF_MSIX_PBA_BAR:
     if (val >= PCI_NUM_REGIONS) {
-      qemu_epc_debug("%s: invalid MSIX_PBA_BAR %" PRIu64, __func__, val);
+      trace_qepc_ctrl_write_msix_pba_bar_invalid(val);
       return;
     }
     s->msix_pba_bar = (uint8_t)val;
-    qemu_epc_debug("%s: MSIX_PBA_BAR=%u", __func__, s->msix_pba_bar);
+    trace_qepc_ctrl_write_msix_pba_bar(s->msix_pba_bar);
     break;
 
   case QEPC_CTRL_OFF_MSIX_PBA_OFF:
     s->msix_pba_off = (uint32_t)val;
-    qemu_epc_debug("%s: MSIX_PBA_OFF=0x%x", __func__, s->msix_pba_off);
+    trace_qepc_ctrl_write_msix_pba_off(s->msix_pba_off);
     break;
 
   case QEPC_CTRL_OFF_MSIX_CFG:
@@ -630,19 +609,14 @@ void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
      * Here we just log and sanity-check.
      */
     if (val != 1) {
-      qemu_epc_debug("%s: MSIX_CFG: ignoring val=%" PRIu64
-                     " (write 1 to commit)", __func__, val);
+      trace_qepc_ctrl_write_msix_cfg_ignore(val);
       break;
     }
     if (s->msix_num == 0) {
-      qemu_epc_debug("%s: MSIX_CFG: msix_num not set, ignoring commit",
-                     __func__);
+      trace_qepc_ctrl_write_msix_cfg_no_num();
       break;
     }
-    qemu_epc_debug("%s: MSIX_CFG committed: num=%u tbl_bar=%u tbl_off=0x%x "
-                   "pba_bar=%u pba_off=0x%x",
-                   __func__, s->msix_num, s->msix_table_bar,
-                   s->msix_table_off, s->msix_pba_bar, s->msix_pba_off);
+    trace_qepc_ctrl_write_msix_cfg_commit(s->msix_num, s->msix_table_bar, s->msix_table_off, s->msix_pba_bar, s->msix_pba_off);
     break;
 
   /* -----------------------------------------------------------------------
@@ -655,18 +629,16 @@ void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
 
   case QEPC_CTRL_OFF_MSI_CFG:
     if (val == 0 || val > 32) {
-      qemu_epc_debug("%s: invalid MSI_CFG %" PRIu64 " (must be 1-32)",
-                     __func__, val);
+      trace_qepc_ctrl_write_msi_cfg_invalid(val);
       return;
     }
     /* Enforce power-of-two requirement from the PCI MSI spec. */
     if (val & (val - 1)) {
-      qemu_epc_debug("%s: MSI_CFG %" PRIu64 " is not a power of two",
-                     __func__, val);
+      trace_qepc_ctrl_write_msi_cfg_not_pow2(val);
       return;
     }
     s->msi_num = (uint16_t)val;
-    qemu_epc_debug("%s: MSI_CFG=%u vectors committed", __func__, s->msi_num);
+    trace_qepc_ctrl_write_msi_cfg_commit(s->msi_num);
     break;
 
   /* -----------------------------------------------------------------------
@@ -680,17 +652,16 @@ void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
 
   case QEPC_CTRL_OFF_DB_BAR:
     if (val >= PCI_NUM_REGIONS) {
-      qemu_epc_debug("%s: invalid DB_BAR %" PRIu64, __func__, val);
+      trace_qepc_ctrl_write_db_bar_invalid(val);
       return;
     }
     s->doorbell_bar = (uint8_t)val;
-    qemu_epc_debug("%s: doorbell BAR set to %u", __func__, s->doorbell_bar);
+    trace_qepc_ctrl_write_db_bar(s->doorbell_bar);
     break;
 
   case QEPC_CTRL_OFF_DB_OFF:
     s->doorbell_offset = (uint32_t)val;
-    qemu_epc_debug("%s: doorbell offset set to 0x%x", __func__,
-                   s->doorbell_offset);
+    trace_qepc_ctrl_write_db_off(s->doorbell_offset);
     break;
 
   /* -----------------------------------------------------------------------
@@ -718,27 +689,24 @@ void qepc_ctrl_mmio_write(void *opaque, hwaddr addr, uint64_t val,
 
   case QEPC_CTRL_OFF_DMA_LEN:
     s->dma_len = (uint32_t)val;
-    qemu_epc_debug("%s: DMA_LEN=0x%x", __func__, s->dma_len);
+    trace_qepc_ctrl_write_dma_len(s->dma_len);
     break;
 
   case QEPC_CTRL_OFF_DMA_STATUS:
     /* Read-only from guest perspective; writes are ignored. */
-    qemu_epc_debug("%s: guest attempted write to DMA_STATUS (ignored)",
-                   __func__);
+    trace_qepc_ctrl_write_dma_status_ignored();
     break;
 
   case QEPC_CTRL_OFF_DMA_START:
     if (val) {
-      qemu_epc_debug("%s: DMA_START: src=0x%lx dst=0x%lx len=0x%x",
-                     __func__, (unsigned long)s->dma_src,
-                     (unsigned long)s->dma_dst, s->dma_len);
+      trace_qepc_ctrl_write_dma_start(s->dma_src, s->dma_dst, s->dma_len);
       s->dma_status = 0; /* mark busy / clear previous result */
       qepc_handle_dma_start(s);
     }
     break;
 
   default:
-    qemu_epc_debug("CTRL write: invalid address 0x%lx", addr);
+    trace_qepc_ctrl_write_invalid_addr((uint64_t)addr);
     break;
   }
 }
@@ -813,12 +781,11 @@ void qepc_cfg_bar_write(void *opaque, hwaddr addr, uint64_t val,
   uint32_t lo;
   uint64_t tmp;
 
-  qemu_epc_debug("%s: write addr=0x%lx size=%u val=0x%lx", __func__,
-                 (unsigned long)addr, size, (unsigned long)val);
+  trace_qepc_cfg_bar_write((uint64_t)addr, size, val);
 
   if (addr + size > QEPC_BAR_CFG_OFF_SIZE + 8) {
     /* TODO: Turn this into a hard error once the ABI is stable. */
-    qemu_epc_debug("%s: overrun %ld", __func__, addr + size);
+    trace_qepc_cfg_bar_write_overrun((uint64_t)(addr + size));
   }
 
   switch (addr) {
@@ -829,15 +796,15 @@ void qepc_cfg_bar_write(void *opaque, hwaddr addr, uint64_t val,
      * modify the PCI config space BAR contents.
      */
     s->bar_mask = val;
-    qemu_epc_debug("%s: bar_mask updated to 0x%x", __func__, s->bar_mask);
+    trace_qepc_cfg_bar_write_mask(s->bar_mask);
     break;
   case QEPC_BAR_CFG_OFF_NUMBER:
     if (val >= PCI_NUM_REGIONS) {
-      qemu_epc_debug("%s: invalid BAR number %" PRIu64, __func__, val);
+      trace_qepc_cfg_bar_write_number_invalid(val);
       return;
     }
     s->bar_no = val;
-    qemu_epc_debug("%s: bar_no set to %u", __func__, s->bar_no);
+    trace_qepc_cfg_bar_write_number(s->bar_no);
     break;
   case QEPC_BAR_CFG_OFF_FLAGS: {
     /*
@@ -850,7 +817,7 @@ void qepc_cfg_bar_write(void *opaque, hwaddr addr, uint64_t val,
     uint8_t bar = s->bar_no;
 
     if (bar >= PCI_NUM_REGIONS) {
-      qemu_epc_debug("%s: FLAGS write with invalid bar_no %u", __func__, bar);
+      trace_qepc_cfg_bar_write_flags_invalid(bar);
       return;
     }
 
@@ -869,8 +836,7 @@ void qepc_cfg_bar_write(void *opaque, hwaddr addr, uint64_t val,
     lo = (lo & ~0xF) | (attr & 0xF);
     memcpy(ptr8, &lo, sizeof(lo));
 
-    qemu_epc_debug("%s: bar[%d] FLAGS updated lo=0x%x (flags 0x%x)", __func__,
-                   bar, lo, attr);
+    trace_qepc_cfg_bar_write_flags(bar, lo, attr);
     break;
   }
   case QEPC_BAR_CFG_OFF_RSV:
@@ -885,8 +851,7 @@ void qepc_cfg_bar_write(void *opaque, hwaddr addr, uint64_t val,
     uint8_t bar = s->bar_no;
 
     if (bar >= PCI_NUM_REGIONS) {
-      qemu_epc_debug("%s: PHYS_ADDR write with invalid bar_no %u", __func__,
-                     bar);
+      trace_qepc_cfg_bar_write_phys_invalid(bar);
       return;
     }
     s->bars[bar].phys_addr = val;
@@ -898,23 +863,22 @@ void qepc_cfg_bar_write(void *opaque, hwaddr addr, uint64_t val,
      */
     ptr8 = s->pcie_config + 0x10 + 4 * bar;
     memcpy(&tmp, ptr8, sizeof(uint64_t));
-    qemu_epc_debug("%s: bar[%d] PHYS_ADDR=0x%lx (cfg_lo=0x%lx)", __func__, bar,
-                   (unsigned long)val, (unsigned long)(tmp & 0xffffffffUL));
+    trace_qepc_cfg_bar_write_phys(bar, val, tmp & 0xffffffffUL);
     break;
   }
   case QEPC_BAR_CFG_OFF_SIZE: {
     uint8_t bar = s->bar_no;
 
     if (bar >= PCI_NUM_REGIONS) {
-      qemu_epc_debug("%s: SIZE write with invalid bar_no %u", __func__, bar);
+      trace_qepc_cfg_bar_write_size_invalid(bar);
       return;
     }
     if (val == 0) {
-      qemu_epc_debug("%s: ignoring zero-sized BAR %u", __func__, bar);
+      trace_qepc_cfg_bar_write_size_zero(bar);
       return;
     }
     s->bars[bar].size = val;
-    qemu_epc_debug("%s: bar[%d] SIZE=0x%lx", __func__, bar, (unsigned long)val);
+    trace_qepc_cfg_bar_write_size(bar, val);
     break;
   }
   }
