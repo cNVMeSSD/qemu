@@ -11,6 +11,7 @@
 # -------------------------------------------------------------------------
 
 # qepc_realize
+qepc_realize_msi_init(uint32_t nr_vectors) "server-side doorbell MSI init nr_vectors=%u"
 qepc_realize_ctrl_bar(uint64_t size, uint32_t raw) "ctrl_bar size=0x%"PRIx64" (raw=0x%x)"
 qepc_realize_pci_config_alloc(uint64_t size, void *ptr) "pci_config_alloc size=0x%"PRIx64" ptr=%p"
 qepc_realize_pci_config_init(uint64_t size, void *ptr) "pci_config_init size=0x%"PRIx64" ptr=%p"
@@ -167,6 +168,8 @@ qepc_bar_access_disabled(uint32_t bar, uint32_t mask) "access to disabled BAR %u
 qepc_bar_access_oob(uint32_t bar, uint64_t off, uint64_t size, uint64_t bar_size) "BAR %u out-of-bounds off=0x%"PRIx64" size=0x%"PRIx64" bar_size=0x%"PRIx64
 qepc_bar_access_msix_mirror(const char *region, uint64_t off) "MSI-X %s write mirrored to vfu cfg off=0x%"PRIx64
 qepc_bar_access_doorbell(uint32_t bar, uint64_t offset, uint32_t val) "doorbell ring on BAR%u offset=0x%"PRIx64" val=0x%x"
+qepc_bar_access_doorbell_msi_notify(uint32_t vector) "delivering doorbell MSI to server vector=%u"
+qepc_bar_access_doorbell_msi_disabled(void) "doorbell fired but server MSI not enabled, dropping"
 qepc_bar_access_dma_addr(uint64_t addr) "resolved DMA addr=0x%"PRIx64
 
 # qepc_ctrl_handle_start

@@ -113,6 +113,26 @@ static void qepc_realize(PCIDevice *pci_dev, Error **errp)
     s->doorbell_bar    = 0xFF; /* sentinel: no doorbell configured */
     s->doorbell_offset = 0;
 
+//    /*
+//     * Add a 32-vector MSI capability to this PCI device so that server Linux
+//     * can call pci_alloc_irq_vectors() on it.  This MSI is entirely local to
+//     * the server machine — it is unrelated to the MSI/MSI-X capability that
+//     * qepc_ctrl_handle_start() later registers with libvfio-user for the RC
+//     * side.  When the RC rings the doorbell (writes to the configured BAR
+//     * offset), qepc_bar_access() calls msi_notify(&s->dev, 0) to deliver
+//     * this interrupt to the server kernel.
+//     *
+//     * offset=0   → let QEMU auto-place the capability in config space.
+//     * nr_vectors=32 → maximum allowed by the PCI MSI spec; covers any number
+//     *                 of doorbell channels the EPF driver may request.
+//     * msi64bit=true → advertise 64-bit message address support.
+//     * msi_per_vector_mask=true → allow per-vector masking.
+//     */
+//    if (msi_init(pci_dev, 0, 16, true, true, errp) < 0) {
+//        return;
+//    }
+//    trace_qepc_realize_msi_init(16);
+//
     trace_qepc_realize_ctrl_bar((uint64_t)pow2ceil(QEPC_CTRL_SIZE), QEPC_CTRL_SIZE);
     memory_region_init_io(&s->ctrl_mr, OBJECT(s), &qepc_ctrl_mmio_ops, s,
                           "qemu-epc/ctrl", pow2ceil(QEPC_CTRL_SIZE));
@@ -181,6 +201,9 @@ static void qepc_exit(PCIDevice *pci_dev)
     QEPCState *s = QEMU_EPC(pci_dev);
 
     trace_qepc_exit();
+//
+//    /* Tear down the server-side doorbell MSI capability. */
+//    msi_uninit(pci_dev);
 
     /* Remove any per-window fast mappings */
     for (int i = 0; i < NUM_OB_WINDOW; i++) {
