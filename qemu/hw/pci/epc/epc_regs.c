@@ -277,15 +277,19 @@ void qepc_handle_single_window_setup(QEPCState *s, uint32_t idx, bool enable) {
   }
 
   /*
-   * QEMU RAM pointers and subregions require page alignment (typically 4KB).
-   * Round up the size to the next 4 KiB boundary so that:
-   *   a) the MemoryRegion is never smaller than one page, and
-   *   b) a non-page-aligned size (e.g. 0xfa001) doesn't leave a partial
-   *      page at the tail that QEMU's memory subsystem may reject.
+   * QEMU RAM pointers and KVM memory slots must be aligned to the real host
+   * page size: KVM_SET_USER_MEMORY_REGION rejects a slot whose guest_phys_addr,
+   * size, or userspace_addr is not host-page-aligned (EINVAL), which aborts the
+   * VM. The EP driver's pci_epc align_addr() op already aligns the window's PCI
+   * base and size to the controller page granularity, so under a correctly
+   * configured stack obs[idx].phys/pci/size are all host-page-aligned here; we
+   * round defensively and verify below so a misconfiguration degrades to an
+   * unmapped window instead of a hard abort.
    */
-  uint64_t map_size = ROUND_UP(s->obs[idx].size, 4096);
+  size_t host_page = qemu_real_host_page_size();
+  uint64_t map_size = ROUND_UP(s->obs[idx].size, host_page);
   if (map_size == 0)
-    map_size = 4096;
+    map_size = host_page;
 
   for (int j = 0; j < SUPPORT_RC_NUM_MRS; j++) {
     /* Skip empty or unmapped Root Complex regions */
@@ -315,6 +319,20 @@ void qepc_handle_single_window_setup(QEPCState *s, uint32_t idx, bool enable) {
        * necessarily at base + N * OB_WINDOW_SIZE.
        */
       hwaddr window_offset = (hwaddr)(s->obs[idx].phys - s->ob_window_mr.addr);
+
+      /*
+       * Both the destination GPA (aperture base + window_offset) and the
+       * backing host virtual address must be host-page-aligned or KVM will
+       * refuse the memory slot and abort the VM. If the EP driver programmed a
+       * window that violates this (e.g. it did not advertise/honour the
+       * controller alignment), skip the zero-copy fast mapping rather than
+       * crashing; the access will simply not be served, which is debuggable.
+       */
+      if (!QEMU_IS_ALIGNED(window_offset, host_page) ||
+          !QEMU_PTR_IS_ALIGNED(host_vaddr, host_page)) {
+        trace_qepc_ob_window_no_rc_region(s->obs[idx].pci);
+        return;
+      }
 
       /*
        * Clean up any existing mapping if the guest is re-configuring an
