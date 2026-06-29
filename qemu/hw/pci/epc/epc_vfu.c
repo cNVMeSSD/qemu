@@ -87,6 +87,59 @@ static void qepc_vfu_log(vfu_ctx_t *vfu_ctx, int level, const char *msg)
  * TODO: Consider integrating with QEMU's event loop more tightly to detect
  *       and handle backend errors in a more structured way.
  */
+/*
+ * qepc_vfu_disconnect
+ *
+ * Recover from a vfio-user client going away (or a fatal run-loop error) so a
+ * *new* client can attach without restarting the endpoint VM.
+ *
+ * Without this, qepc_vfu_run() simply returned on ENOTCONN, leaving the dead
+ * poll-fd handler installed. A closed socket fd stays readable, so QEMU's main
+ * loop then called qepc_vfu_run() in a tight 100%-CPU loop (each call returning
+ * ENOTCONN immediately) and never listened for a new connection again — the
+ * endpoint VM appeared to hang and no client could reconnect.
+ *
+ * Tear the context down exactly like qepc_exit() (drop OB-window fast mappings,
+ * destroy the vfu context, remove the fd handler) and then re-run the start
+ * path to bind a fresh listening socket. All guest-programmed parameters (BARs,
+ * MSI/MSI-X layout, config header) persist in @s, so the rebuilt context is
+ * identical to the one the guest driver originally configured and the next
+ * client enumerates the same device.
+ *
+ * On re-listen failure no fd handler is installed (handle_start only arms one
+ * on success), so the main loop does not spin; the device simply waits until
+ * the guest driver writes START again.
+ */
+static void qepc_vfu_disconnect(QEPCState *s)
+{
+    int i, err;
+
+    /* Remove the dead poll-fd handler first so the main loop stops calling us. */
+    if (s->vfu_fd >= 0) {
+        qemu_set_fd_handler(s->vfu_fd, NULL, NULL, NULL);
+        s->vfu_fd = -1;
+    }
+
+    /* Drop any outbound-window fast mappings referencing the departed client. */
+    for (i = 0; i < NUM_OB_WINDOW; i++) {
+        if (s->ob_fast_mapped[i]) {
+            memory_region_del_subregion(&s->ob_window_mr, &s->rc_local_mr[i]);
+            s->ob_fast_mapped[i] = false;
+        }
+    }
+
+    if (s->vfu) {
+        vfu_destroy_ctx(s->vfu);
+        s->vfu = NULL;
+    }
+
+    /* Re-create the context and listen again for the next client. */
+    err = qepc_ctrl_handle_start(s, 0);
+    if (err) {
+        trace_qepc_vfu_run_failed(err, errno);
+    }
+}
+
 static void qepc_vfu_run(void *opaque)
 {
     QEPCState *s = opaque;
@@ -102,10 +155,12 @@ static void qepc_vfu_run(void *opaque)
                 continue;
             } else if (errno == ENOTCONN) {
                 trace_qepc_vfu_run_disconnect();
-                break;
+                qepc_vfu_disconnect(s);
+                return;
             } else {
                 trace_qepc_vfu_run_failed(err, errno);
-                break;
+                qepc_vfu_disconnect(s);
+                return;
             }
         } else {
             trace_qepc_vfu_run_exit_loop();
